@@ -16,7 +16,7 @@ VectorCore SMSC is a multi-interface SMS core written in Go. It accepts SMS from
 - Multi-protocol ingress/egress
   - SMPP server (inbound ESME binds + submit_sm)
   - SMPP outbound clients
-  - SIP/3GPP ISC messaging
+  - SIP/3GPP ISC (IMS) messaging
   - SIP SIMPLE inter-site messaging
   - Diameter SGd and Sh peer support
 - Routing engine
