@@ -10,6 +10,7 @@ import {
   getSMPPClients,  createSMPPClient,  updateSMPPClient,  deleteSMPPClient,
   getSIPPeers,     createSIPPeer,     updateSIPPeer,     deleteSIPPeer,
   getDiameterPeers, createDiameterPeer, updateDiameterPeer, deleteDiameterPeer,
+  getSGDMMEMappings, createSGDMMEMapping, updateSGDMMEMapping, deleteSGDMMEMapping,
   getRoutingRules,
   getStatusPeers,
 } from '../api/client.js'
@@ -31,6 +32,7 @@ export default function Peers() {
           { id: 'smpp-clients',  label: 'SMPP Clients' },
           { id: 'sip',           label: 'SIP SIMPLE Peers' },
           { id: 'diameter',      label: 'Diameter Peers' },
+          { id: 'sgd-mappings',  label: 'S6c to SGd MME Mappings' },
         ].map(t => (
           <button key={t.id} className={`tab-btn${tab === t.id ? ' active' : ''}`} onClick={() => setTab(t.id)}>
             {t.label}
@@ -42,6 +44,7 @@ export default function Peers() {
       {tab === 'smpp-clients'  && <SMPPClientsTab />}
       {tab === 'sip'           && <SIPPeersTab />}
       {tab === 'diameter'      && <DiameterPeersTab />}
+      {tab === 'sgd-mappings'  && <SGDMMEMappingsTab />}
     </div>
   )
 }
@@ -957,6 +960,148 @@ function DiameterPeersTab() {
       {showModal && <DiameterPeerModal initial={editTarget} onClose={() => setShowModal(false)} onSaved={() => { setShowModal(false); refresh() }} />}
       {deleteTarget && <ConfirmDeleteModal label={`Diameter peer "${deleteTarget.name}"`} onClose={() => setDeleteTarget(null)} onConfirm={handleDelete} loading={!!busy[deleteTarget?.id]} />}
     </div>
+  )
+}
+
+/* ── SGd MME Mappings ────────────────────────────────────────────────────────── */
+
+const SGD_MAPPING_DEFAULTS = { s6c_result: '', sgd_host: '', enabled: true }
+
+function SGDMMEMappingsTab() {
+  const toast = useToast()
+  const { data, error, loading, refresh } = usePoller(getSGDMMEMappings)
+  const [showModal, setShowModal] = useState(false)
+  const [editTarget, setEditTarget] = useState(null)
+  const [deleteTarget, setDeleteTarget] = useState(null)
+  const [busy, setBusy] = useState({})
+
+  const handleDelete = useCallback(async () => {
+    if (!deleteTarget) return
+    setBusy(p => ({ ...p, [deleteTarget.id]: true }))
+    try {
+      await deleteSGDMMEMapping(deleteTarget.id)
+      toast.success('Mapping deleted', deleteTarget.s6c_result)
+      setDeleteTarget(null); refresh()
+    } catch (err) { toast.error('Delete failed', err.message) }
+    finally { setBusy(p => { const n = {...p}; delete n[deleteTarget.id]; return n }) }
+  }, [deleteTarget, toast, refresh])
+
+  const list = Array.isArray(data) ? data : []
+  if (loading) return <div className="loading-center"><Spinner size="md" /></div>
+  if (error && !data) return <ErrorState error={error} onRefresh={refresh} />
+
+  return (
+    <div>
+      <TabHeader count={list.length} noun="mapping" onRefresh={refresh}
+        onAdd={() => { setEditTarget(null); setShowModal(true) }} addLabel="Add Mapping" />
+      <div className="text-muted text-sm" style={{ marginBottom: 12 }}>
+        Translates the MME hostname returned by S6c (S6a FQDN) to the correct SGd FQDN for Diameter delivery.
+        If no enabled match is found the original S6c hostname is used unchanged.
+      </div>
+      {list.length === 0 ? (
+        <div className="empty-state">
+          <div className="empty-state-icon" style={{ fontSize: 28 }}>↔</div>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>No MME mappings configured</div>
+          <div className="text-muted text-sm">Add a mapping when the S6a and SGd FQDNs of an MME differ.</div>
+          <button className="btn btn-primary btn-sm mt-12" onClick={() => { setEditTarget(null); setShowModal(true) }}>
+            <Plus size={12} /> Add Mapping
+          </button>
+        </div>
+      ) : (
+        <div className="table-container">
+          <table>
+            <thead><tr>
+              <th>S6c Result (S6a FQDN)</th>
+              <th>SGd Host (SGd FQDN)</th>
+              <th>Enabled</th>
+              <th>Actions</th>
+            </tr></thead>
+            <tbody>
+              {list.map(m => (
+                <tr key={m.id}>
+                  <td className="mono" style={{ fontSize: '0.82rem' }}>{m.s6c_result}</td>
+                  <td className="mono" style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>{m.sgd_host}</td>
+                  <td><EnabledStatus enabled={m.enabled} /></td>
+                  <td>
+                    <div className="flex gap-6">
+                      <button className="btn-icon" onClick={() => { setEditTarget(m); setShowModal(true) }}><Edit3 size={13} /></button>
+                      <button
+                        className="btn-icon danger"
+                        disabled={!!busy[m.id]}
+                        title="Delete mapping"
+                        onClick={() => setDeleteTarget(m)}
+                      ><Trash2 size={13} /></button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {showModal && <SGDMMEMappingModal initial={editTarget} onClose={() => setShowModal(false)} onSaved={() => { setShowModal(false); refresh() }} />}
+      {deleteTarget && <ConfirmDeleteModal label={`mapping "${deleteTarget.s6c_result}"`} onClose={() => setDeleteTarget(null)} onConfirm={handleDelete} loading={!!busy[deleteTarget?.id]} />}
+    </div>
+  )
+}
+
+function SGDMMEMappingModal({ initial, onClose, onSaved }) {
+  const toast = useToast()
+  const [form, setForm] = useState(() => initial ? { ...SGD_MAPPING_DEFAULTS, ...initial } : { ...SGD_MAPPING_DEFAULTS })
+  const [submitting, setSubmitting] = useState(false)
+  const set = useCallback((k, v) => setForm(p => ({ ...p, [k]: v })), [])
+
+  const handleSubmit = useCallback(async (e) => {
+    e.preventDefault()
+    if (!form.s6c_result.trim()) { toast.error('Validation', 'S6c Result is required.'); return }
+    if (!form.sgd_host.trim())   { toast.error('Validation', 'SGd Host is required.');   return }
+    setSubmitting(true)
+    try {
+      const payload = { s6c_result: form.s6c_result.trim(), sgd_host: form.sgd_host.trim(), enabled: form.enabled }
+      if (initial) {
+        await updateSGDMMEMapping(initial.id, payload)
+        toast.success('Mapping updated', form.s6c_result)
+      } else {
+        await createSGDMMEMapping(payload)
+        toast.success('Mapping created', form.s6c_result)
+      }
+      onSaved()
+    } catch (err) { toast.error('Save failed', err.message) }
+    finally { setSubmitting(false) }
+  }, [form, initial, toast, onSaved])
+
+  return (
+    <Modal title={initial ? 'Edit MME Mapping' : 'Add MME Mapping'} onClose={onClose}>
+      <form onSubmit={handleSubmit}>
+        <div className="modal-body">
+          <div className="form-group">
+            <label className="form-label">S6c Result (S6a FQDN) *</label>
+            <input className="input mono" placeholder="mme1-s6a.realm.com"
+              value={form.s6c_result} onChange={e => set('s6c_result', e.target.value)}
+              disabled={!!initial} required />
+            <div className="text-muted text-sm" style={{ marginTop: 4 }}>MME hostname as returned by S6c SRI-SM</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">SGd Host (SGd FQDN) *</label>
+            <input className="input mono" placeholder="mme1-sgd.realm.com"
+              value={form.sgd_host} onChange={e => set('sgd_host', e.target.value)}
+              required />
+            <div className="text-muted text-sm" style={{ marginTop: 4 }}>MME hostname to use for Diameter SGd delivery</div>
+          </div>
+          <label className="checkbox-wrap">
+            <input type="checkbox" checked={form.enabled} onChange={e => set('enabled', e.target.checked)} />
+            <span>Enabled</span>
+          </label>
+        </div>
+        <div className="modal-footer">
+          <button type="button" className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn btn-primary" disabled={submitting}>
+            {submitting ? <Spinner size="sm" /> : null}
+            {initial ? 'Save Changes' : 'Add Mapping'}
+          </button>
+        </div>
+      </form>
+    </Modal>
   )
 }
 

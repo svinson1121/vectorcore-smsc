@@ -66,6 +66,15 @@ func Open(ctx context.Context, dsn string, pollInterval time.Duration) (*DB, err
 	// Crash recovery: messages stuck in DISPATCHED state (server died mid-send)
 	// are reset to QUEUED so the retry scheduler re-attempts them.
 	sqlDB.ExecContext(ctx, `UPDATE messages SET status='QUEUED', next_retry_at=datetime('now') WHERE status='DISPATCHED'`)
+	// Migration 002: S6c-to-SGd MME name mapping table.
+	sqlDB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS sgd_mme_mappings (
+		id          TEXT PRIMARY KEY,
+		s6c_result  TEXT NOT NULL UNIQUE,
+		sgd_host    TEXT NOT NULL,
+		enabled     INTEGER NOT NULL DEFAULT 1,
+		created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+		updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+	)`)
 
 	n := newNotifier(sqlDB, pollInterval)
 	go n.run(ctx)

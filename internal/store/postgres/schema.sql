@@ -217,3 +217,17 @@ DROP TRIGGER IF EXISTS ims_registrations_notify ON ims_registrations;
 CREATE TRIGGER ims_registrations_notify
     AFTER INSERT OR UPDATE OR DELETE ON ims_registrations
     FOR EACH ROW EXECUTE FUNCTION notify_change();
+
+CREATE TABLE IF NOT EXISTS sgd_mme_mappings (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    s6c_result    TEXT NOT NULL UNIQUE,
+    sgd_host      TEXT NOT NULL,
+    enabled       BOOLEAN NOT NULL DEFAULT true,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+DROP TRIGGER IF EXISTS sgd_mme_mappings_notify ON sgd_mme_mappings;
+CREATE TRIGGER sgd_mme_mappings_notify
+    AFTER INSERT OR UPDATE OR DELETE ON sgd_mme_mappings
+    FOR EACH ROW EXECUTE FUNCTION notify_change();

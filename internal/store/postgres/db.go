@@ -58,6 +58,19 @@ func Open(ctx context.Context, dsn string) (*DB, error) {
 	// Crash recovery: messages stuck in DISPATCHED state (server died mid-send)
 	// are reset to QUEUED so the retry scheduler re-attempts them.
 	pool.Exec(ctx, `UPDATE messages SET status='QUEUED', next_retry_at=now() WHERE status='DISPATCHED'`)
+	// Migration 002: S6c-to-SGd MME name mapping table.
+	pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS sgd_mme_mappings (
+		id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		s6c_result    TEXT NOT NULL UNIQUE,
+		sgd_host      TEXT NOT NULL,
+		enabled       BOOLEAN NOT NULL DEFAULT true,
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+		updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`)
+	pool.Exec(ctx, `DROP TRIGGER IF EXISTS sgd_mme_mappings_notify ON sgd_mme_mappings`)
+	pool.Exec(ctx, `CREATE TRIGGER sgd_mme_mappings_notify
+		AFTER INSERT OR UPDATE OR DELETE ON sgd_mme_mappings
+		FOR EACH ROW EXECUTE FUNCTION notify_change()`)
 	return db, nil
 }
 

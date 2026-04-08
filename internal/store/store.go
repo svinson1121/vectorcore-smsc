@@ -171,6 +171,18 @@ type MessageFilter struct {
 	Limit      int
 }
 
+// SGDMMEMapping mirrors the sgd_mme_mappings table.
+// It maps an MME hostname returned by S6c (the S6a FQDN) to the SGd FQDN
+// used for Diameter SGd message delivery.
+type SGDMMEMapping struct {
+	ID        string    `json:"id"`
+	S6CResult string    `json:"s6c_result"`
+	SGDHost   string    `json:"sgd_host"`
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // DeliveryReport mirrors the delivery_reports table.
 type DeliveryReport struct {
 	ID          string    `json:"id"`
@@ -283,6 +295,13 @@ type Store interface {
 	// Delivery reports — API views
 	ListDeliveryReports(ctx context.Context, limit int) ([]DeliveryReport, error)
 	GetDeliveryReport(ctx context.Context, id string) (*DeliveryReport, error)
+
+	// SGd MME mappings — full CRUD
+	ListSGDMMEMappings(ctx context.Context) ([]SGDMMEMapping, error)
+	GetSGDMMEMappingByID(ctx context.Context, id string) (*SGDMMEMapping, error)
+	CreateSGDMMEMapping(ctx context.Context, m SGDMMEMapping) error
+	UpdateSGDMMEMapping(ctx context.Context, m SGDMMEMapping) error
+	DeleteSGDMMEMapping(ctx context.Context, id string) error
 
 	// Hot-reload subscription.
 	Subscribe(ctx context.Context, table string, ch chan<- ChangeEvent) error

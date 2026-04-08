@@ -200,6 +200,21 @@ func (s *alertTestStore) Subscribe(context.Context, string, chan<- store.ChangeE
 	panic("unexpected call")
 }
 func (s *alertTestStore) Close() error { return nil }
+func (s *alertTestStore) ListSGDMMEMappings(context.Context) ([]store.SGDMMEMapping, error) {
+	panic("unexpected call")
+}
+func (s *alertTestStore) GetSGDMMEMappingByID(context.Context, string) (*store.SGDMMEMapping, error) {
+	panic("unexpected call")
+}
+func (s *alertTestStore) CreateSGDMMEMapping(context.Context, store.SGDMMEMapping) error {
+	panic("unexpected call")
+}
+func (s *alertTestStore) UpdateSGDMMEMapping(context.Context, store.SGDMMEMapping) error {
+	panic("unexpected call")
+}
+func (s *alertTestStore) DeleteSGDMMEMapping(context.Context, string) error {
+	panic("unexpected call")
+}
 
 func makeALSCRequeueHandler(st store.Store) func(s6c.AlertServiceCentreRequest) error {
 	return func(req s6c.AlertServiceCentreRequest) error {

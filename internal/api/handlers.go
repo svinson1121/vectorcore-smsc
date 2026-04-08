@@ -836,3 +836,94 @@ func registerMessages(api huma.API, st store.Store) {
 		return &struct{ Body store.DeliveryReport }{*v}, nil
 	})
 }
+
+// ── SGd MME Mappings ──────────────────────────────────────────────────────────
+
+type sgdMMEMappingInput struct {
+	S6CResult string `json:"s6c_result" doc:"MME hostname as returned by S6c (S6a FQDN)"`
+	SGDHost   string `json:"sgd_host" doc:"MME SGd FQDN to use for Diameter SGd delivery"`
+	Enabled   bool   `json:"enabled"`
+}
+
+func registerSGDMMEMappings(api huma.API, st store.Store) {
+	huma.Register(api, huma.Operation{
+		OperationID: "list-sgd-mme-mappings", Method: http.MethodGet,
+		Path: "/api/v1/sgd/mme-mappings", Summary: "List S6c to SGd MME mappings", Tags: []string{"Diameter"},
+	}, func(ctx context.Context, _ *struct{}) (*struct{ Body []store.SGDMMEMapping }, error) {
+		v, err := st.ListSGDMMEMappings(ctx)
+		if err != nil {
+			return nil, dbErr(err)
+		}
+		if v == nil {
+			v = []store.SGDMMEMapping{}
+		}
+		return &struct{ Body []store.SGDMMEMapping }{v}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "get-sgd-mme-mapping", Method: http.MethodGet,
+		Path: "/api/v1/sgd/mme-mappings/{id}", Summary: "Get S6c to SGd MME mapping", Tags: []string{"Diameter"},
+	}, func(ctx context.Context, input *struct {
+		ID string `path:"id"`
+	}) (*struct{ Body store.SGDMMEMapping }, error) {
+		v, err := st.GetSGDMMEMappingByID(ctx, input.ID)
+		if err != nil {
+			return nil, dbErr(err)
+		}
+		if v == nil {
+			return nil, notFound("mapping not found")
+		}
+		return &struct{ Body store.SGDMMEMapping }{*v}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "create-sgd-mme-mapping", Method: http.MethodPost,
+		Path: "/api/v1/sgd/mme-mappings", Summary: "Create S6c to SGd MME mapping",
+		Tags: []string{"Diameter"}, DefaultStatus: http.StatusCreated,
+	}, func(ctx context.Context, input *struct{ Body sgdMMEMappingInput }) (*struct{}, error) {
+		return nil, dbErr(st.CreateSGDMMEMapping(ctx, store.SGDMMEMapping{
+			S6CResult: input.Body.S6CResult,
+			SGDHost:   input.Body.SGDHost,
+			Enabled:   input.Body.Enabled,
+		}))
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "update-sgd-mme-mapping", Method: http.MethodPut,
+		Path: "/api/v1/sgd/mme-mappings/{id}", Summary: "Update S6c to SGd MME mapping", Tags: []string{"Diameter"},
+	}, func(ctx context.Context, input *struct {
+		ID   string `path:"id"`
+		Body sgdMMEMappingInput
+	}) (*struct{}, error) {
+		existing, err := st.GetSGDMMEMappingByID(ctx, input.ID)
+		if err != nil {
+			return nil, dbErr(err)
+		}
+		if existing == nil {
+			return nil, notFound("mapping not found")
+		}
+		return nil, dbErr(st.UpdateSGDMMEMapping(ctx, store.SGDMMEMapping{
+			ID:        input.ID,
+			S6CResult: input.Body.S6CResult,
+			SGDHost:   input.Body.SGDHost,
+			Enabled:   input.Body.Enabled,
+		}))
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "delete-sgd-mme-mapping", Method: http.MethodDelete,
+		Path: "/api/v1/sgd/mme-mappings/{id}", Summary: "Delete S6c to SGd MME mapping",
+		Tags: []string{"Diameter"}, DefaultStatus: http.StatusNoContent,
+	}, func(ctx context.Context, input *struct {
+		ID string `path:"id"`
+	}) (*struct{}, error) {
+		existing, err := st.GetSGDMMEMappingByID(ctx, input.ID)
+		if err != nil {
+			return nil, dbErr(err)
+		}
+		if existing == nil {
+			return nil, notFound("mapping not found")
+		}
+		return nil, dbErr(st.DeleteSGDMMEMapping(ctx, input.ID))
+	})
+}

@@ -27,6 +27,7 @@ import (
 	"github.com/svinson1121/vectorcore-smsc/internal/metrics"
 	"github.com/svinson1121/vectorcore-smsc/internal/registry"
 	"github.com/svinson1121/vectorcore-smsc/internal/routing"
+	"github.com/svinson1121/vectorcore-smsc/internal/sgdmap"
 	sipserver "github.com/svinson1121/vectorcore-smsc/internal/sip"
 	"github.com/svinson1121/vectorcore-smsc/internal/sip/isc"
 	"github.com/svinson1121/vectorcore-smsc/internal/sip/simple"
@@ -39,7 +40,7 @@ import (
 )
 
 // version is overridden at build time via -ldflags "-X main.version=..."
-var version = "0.0.1d"
+var version = "0.2.5b"
 
 func appIDsForDiameterPeer(apps []string) []uint32 {
 	appIDs := make([]uint32, 0, len(apps))
@@ -164,6 +165,12 @@ func run(cfgPath string) error {
 		return fmt.Errorf("routing loader: %w", err)
 	}
 
+	// ── SGd MME name mapper ───────────────────────────────────────────────────
+	sgdMapper, err := sgdmap.NewMapper(ctx, st)
+	if err != nil {
+		return fmt.Errorf("sgd mme mapper: %w", err)
+	}
+
 	// ── Shared SMPP link registry ─────────────────────────────────────────────
 	smppReg := smpp.NewRegistry()
 
@@ -235,6 +242,7 @@ func run(cfgPath string) error {
 		SMPPManager:  clientMgr,
 		SGdSender:    sgdServer,
 		Reporter:     correlator,
+		SGDMapper:    sgdMapper,
 	})
 
 	// ── Retry Scheduler ───────────────────────────────────────────────────────

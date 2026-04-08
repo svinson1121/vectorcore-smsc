@@ -213,6 +213,21 @@ func (s *forwarderTestStore) Subscribe(context.Context, string, chan<- store.Cha
 	return nil
 }
 func (s *forwarderTestStore) Close() error { return nil }
+func (s *forwarderTestStore) ListSGDMMEMappings(context.Context) ([]store.SGDMMEMapping, error) {
+	panic("unexpected call")
+}
+func (s *forwarderTestStore) GetSGDMMEMappingByID(context.Context, string) (*store.SGDMMEMapping, error) {
+	panic("unexpected call")
+}
+func (s *forwarderTestStore) CreateSGDMMEMapping(context.Context, store.SGDMMEMapping) error {
+	panic("unexpected call")
+}
+func (s *forwarderTestStore) UpdateSGDMMEMapping(context.Context, store.SGDMMEMapping) error {
+	panic("unexpected call")
+}
+func (s *forwarderTestStore) DeleteSGDMMEMapping(context.Context, string) error {
+	panic("unexpected call")
+}
 
 type fakeSimpleSender struct{ calls int }
 

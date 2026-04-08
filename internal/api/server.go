@@ -75,6 +75,7 @@ func (s *Server) Handler() http.Handler {
 	registerSFPolicies(api, s.st)
 	registerSubscribers(api, s.st)
 	registerMessages(api, s.st)
+	registerSGDMMEMappings(api, s.st)
 
 	// OAM status endpoint
 	type msgCounts struct {

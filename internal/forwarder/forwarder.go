@@ -19,6 +19,7 @@ import (
 	"github.com/svinson1121/vectorcore-smsc/internal/smpp"
 	smppClient "github.com/svinson1121/vectorcore-smsc/internal/smpp/client"
 	"github.com/svinson1121/vectorcore-smsc/internal/store"
+	"github.com/svinson1121/vectorcore-smsc/internal/sgdmap"
 )
 
 // ISCSender sends MT SMS to IMS UEs via the SIP ISC interface.
@@ -53,11 +54,12 @@ type selectedRoute struct {
 
 // Forwarder dispatches messages to the correct egress interface.
 type Forwarder struct {
-	reg    *registry.Registry
-	engine *routing.Engine
-	st     store.Store
-	scAddr string // Our SMSC address for RP-OA / SGd SC-Address
-	m      *metrics.M
+	reg       *registry.Registry
+	engine    *routing.Engine
+	st        store.Store
+	scAddr    string // Our SMSC address for RP-OA / SGd SC-Address
+	m         *metrics.M
+	sgdMapper *sgdmap.Mapper // optional; nil = no MME name translation
 
 	// Egress senders — all optional; nil means that interface is not available.
 	iscSender    ISCSender
@@ -79,6 +81,7 @@ type Config struct {
 	SMPPManager  *smppClient.Manager
 	SGdSender    SGdSender
 	Reporter     DeliveryReporter
+	SGDMapper    *sgdmap.Mapper // optional S6c→SGd MME name translator
 }
 
 // New creates a Forwarder.
@@ -89,6 +92,7 @@ func New(cfg Config) *Forwarder {
 		st:           cfg.Store,
 		scAddr:       cfg.SCAddr,
 		m:            cfg.Metrics,
+		sgdMapper:    cfg.SGDMapper,
 		iscSender:    cfg.ISCSender,
 		simpleSender: cfg.SimpleSender,
 		smppMgr:      cfg.SMPPManager,
@@ -315,7 +319,7 @@ func (f *Forwarder) resolveSGdTarget(ctx context.Context, msisdn string) (string
 	}
 	sub, err := f.st.GetSubscriber(ctx, msisdn)
 	if err == nil && sub != nil && sub.LTEAttached && sub.MMEHost != "" && sub.IMSI != "" {
-		return sub.MMEHost, sub.IMSI, ""
+		return f.applyMMEMapping(sub.MMEHost), sub.IMSI, ""
 	}
 	s6cSub, s6cErr := f.reg.S6cLookup(ctx, msisdn)
 	if s6cErr != nil {
@@ -327,7 +331,16 @@ func (f *Forwarder) resolveSGdTarget(ctx context.Context, msisdn string) (string
 	if s6cSub.IMSI == "" {
 		return "", "", "S6c did not return an IMSI"
 	}
-	return s6cSub.MMEHost, s6cSub.IMSI, ""
+	return f.applyMMEMapping(s6cSub.MMEHost), s6cSub.IMSI, ""
+}
+
+// applyMMEMapping translates an MME hostname via the S6c→SGd mapping table.
+// If no mapper is configured or no enabled entry matches, the original host is returned.
+func (f *Forwarder) applyMMEMapping(mmeHost string) string {
+	if f.sgdMapper == nil {
+		return mmeHost
+	}
+	return f.sgdMapper.Map(mmeHost)
 }
 
 // persistMessage writes a new message record to the store.

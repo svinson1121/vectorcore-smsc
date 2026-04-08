@@ -91,6 +91,13 @@ export const deleteQueueMessage = (id) => request('DELETE', `/messages/queue/${i
 export const getDeliveryReports = (limit) => request('GET', `/delivery-reports?limit=${limit || 100}`)
 export const getDeliveryReport  = (id)    => request('GET', `/delivery-reports/${id}`)
 
+// ── SGd MME Mappings ──────────────────────────────────────────────────────────
+export const getSGDMMEMappings    = ()       => request('GET',    '/sgd/mme-mappings')
+export const getSGDMMEMapping     = (id)     => request('GET',    `/sgd/mme-mappings/${id}`)
+export const createSGDMMEMapping  = (data)   => request('POST',   '/sgd/mme-mappings', data)
+export const updateSGDMMEMapping  = (id, d)  => request('PUT',    `/sgd/mme-mappings/${id}`, d)
+export const deleteSGDMMEMapping  = (id)     => request('DELETE', `/sgd/mme-mappings/${id}`)
+
 // ── Raw Prometheus ────────────────────────────────────────────────────────────
 export async function getPrometheusText() {
   const res = await fetch('/metrics')
