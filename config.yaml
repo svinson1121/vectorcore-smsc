@@ -1,0 +1,52 @@
+smsc:
+  address: "+15550000000"  # SMSC E.164 / GT — used across all interfaces
+
+smpp:
+  server:
+    address: "0.0.0.0"
+    port: 2775
+    max_connections: 50
+    enquire_link_interval: 30s
+    response_timeout: 10s
+
+sip:
+  address: "0.0.0.0"
+  port: 5060
+  transport: udp        # udp | tcp
+  isc:
+    # Accept-Contact header sent on ISC SIP MESSAGE requests.
+    # Typical IMS SMS-over-IP value:
+    accept_contact: "*;+g.3gpp.smsip"
+    # Example alternative if your network wants no explicit Accept-Contact:
+    # accept_contact: ""
+
+    # Request-Disposition used for MT delivery MESSAGEs sent toward the recipient UE.
+    # Common values are "no-fork" or "fork".
+    mt_request_disposition: "no-fork"
+    # Example alternative:
+    # mt_request_disposition: "fork"
+
+    # Request-Disposition used for the separate submit-report MESSAGE
+    # that carries RP-ACK / RP-ERROR back to the originating UE.
+    submit_report_request_disposition: "no-fork"
+    # Example alternative:
+    # submit_report_request_disposition: "fork"
+
+diameter:
+  address: "0.0.0.0"
+  port: 3868
+  transport: tcp        # tcp | sctp
+  local_fqdn: "smsc.example.com"
+  local_realm: "example.com"
+
+database:
+  driver: postgres      # postgres | sqlite
+  dsn: "postgres://smsc:smsc@localhost/vectorcore_smsc"
+  # For SQLite:
+  # driver: sqlite
+  # dsn: "./vectorcore_smsc.db"
+  # poll_interval: 2s
+
+api:
+  address: "0.0.0.0"
+  port: 8080

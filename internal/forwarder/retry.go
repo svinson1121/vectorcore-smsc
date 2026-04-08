@@ -1,0 +1,199 @@
+package forwarder
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	"github.com/svinson1121/vectorcore-smsc/internal/codec"
+	"github.com/svinson1121/vectorcore-smsc/internal/codec/tpdu"
+	"github.com/svinson1121/vectorcore-smsc/internal/store"
+)
+
+// RetryScheduler polls for retryable messages and re-dispatches them.
+// It respects the SF policy attached to each message's routing rule.
+type RetryScheduler struct {
+	f        *Forwarder
+	interval time.Duration
+}
+
+// NewRetryScheduler creates a RetryScheduler that polls every interval.
+func NewRetryScheduler(f *Forwarder, interval time.Duration) *RetryScheduler {
+	return &RetryScheduler{f: f, interval: interval}
+}
+
+// Run starts the retry loop and blocks until ctx is cancelled.
+func (r *RetryScheduler) Run(ctx context.Context) {
+	ticker := time.NewTicker(r.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.tick(ctx)
+		}
+	}
+}
+
+func (r *RetryScheduler) tick(ctx context.Context) {
+	msgs, err := r.f.st.ListRetryableMessages(ctx)
+	if err != nil {
+		slog.Error("retry scheduler: list retryable messages", "err", err)
+		return
+	}
+	for _, m := range msgs {
+		r.dispatch(ctx, m)
+	}
+}
+
+func (r *RetryScheduler) dispatch(ctx context.Context, m store.Message) {
+	// Mark as dispatched so a concurrent sweep doesn't double-deliver.
+	if err := r.f.st.UpdateMessageStatus(ctx, m.ID, store.MessageStatusDispatched); err != nil {
+		slog.Error("retry: mark dispatched failed", "id", m.ID, "err", err)
+		return
+	}
+
+	msg := storeToCodecMessage(m)
+	route, err := r.f.selectRoute(ctx, msg)
+	if err != nil {
+		slog.Warn("retry: no usable route", "id", m.ID, "dst", m.DstMSISDN, "err", err)
+		r.scheduleOrFail(ctx, m)
+		return
+	}
+	msg.EgressInterface = codec.InterfaceType(route.egressIface)
+	if err := r.f.st.UpdateMessageRouting(ctx, m.ID, route.egressIface, route.egressPeer); err != nil {
+		slog.Error("retry: update message routing failed", "id", m.ID, "err", err)
+	}
+
+	var delivErr error
+	if r.f.m != nil {
+		r.f.m.MessagesOut.WithLabelValues(route.egressIface).Inc()
+	}
+	switch route.egressIface {
+	case "sip3gpp":
+		delivErr = r.f.deliverISC(ctx, msg, route.imsReg)
+	case "sipsimple":
+		delivErr = r.f.deliverSimple(ctx, msg, route.egressPeer)
+	case "smpp":
+		delivErr = r.f.deliverSMPP(ctx, msg, route.egressPeer)
+	case "sgd":
+		msg.Destination.IMSI = route.sgdIMSI
+		delivErr = r.f.deliverSGd(ctx, msg, route.egressPeer)
+	default:
+		slog.Error("retry: unknown egress iface", "id", m.ID, "iface", route.egressIface)
+		_ = r.f.st.UpdateMessageStatus(ctx, m.ID, store.MessageStatusFailed)
+		return
+	}
+
+	if delivErr == nil {
+		slog.Info("retry: delivered", "id", m.ID, "egress", route.egressIface, "peer", route.egressPeer)
+		_ = r.f.st.UpdateMessageStatus(ctx, m.ID, store.MessageStatusDelivered)
+		if r.f.reporter != nil {
+			if stored, err := r.f.st.GetMessage(ctx, m.ID); err == nil && stored != nil {
+				r.f.reporter.Report(ctx, *stored, "DELIVRD")
+			}
+		}
+		return
+	}
+
+	if r.f.m != nil {
+		r.f.m.SFRetried.Inc()
+	}
+	slog.Warn("retry: delivery failed", "id", m.ID, "egress", route.egressIface, "peer", route.egressPeer, "err", delivErr)
+
+	r.scheduleOrFail(ctx, m)
+}
+
+func (r *RetryScheduler) scheduleOrFail(ctx context.Context, m store.Message) {
+	// Compute next retry using SF policy if available.
+	next := r.nextRetry(ctx, m)
+	if next == nil {
+		// Max retries exceeded or no policy — fail permanently.
+		slog.Warn("retry: max retries exceeded, marking failed", "id", m.ID)
+		_ = r.f.st.UpdateMessageStatus(ctx, m.ID, store.MessageStatusFailed)
+		if r.f.reporter != nil {
+			if stored, err := r.f.st.GetMessage(ctx, m.ID); err == nil && stored != nil {
+				r.f.reporter.Report(ctx, *stored, "FAILED")
+			}
+		}
+		return
+	}
+
+	if err := r.f.st.UpdateMessageRetry(ctx, m.ID, m.RetryCount+1, *next); err != nil {
+		slog.Error("retry: update retry failed", "id", m.ID, "err", err)
+	}
+}
+
+// nextRetry returns the absolute time of the next retry attempt, or nil if
+// the message has exhausted its retries.
+func (r *RetryScheduler) nextRetry(ctx context.Context, m store.Message) *time.Time {
+	// Default: simple exponential-ish schedule without a named policy.
+	defaultSchedule := []int{30, 300, 1800, 3600, 3600, 3600, 3600, 3600}
+
+	schedule := defaultSchedule
+	maxRetries := len(defaultSchedule)
+
+	// Try to load the SF policy referenced by the routing rule.
+	if sfPolicyID := r.sfPolicyForMessage(ctx, m); sfPolicyID != "" {
+		if pol, err := r.f.st.GetSFPolicy(ctx, sfPolicyID); err == nil && pol != nil {
+			schedule = pol.RetrySchedule
+			maxRetries = pol.MaxRetries
+		}
+	}
+
+	attempt := m.RetryCount + 1 // this will be the Nth attempt (0-indexed RetryCount)
+	if attempt > maxRetries {
+		return nil
+	}
+
+	idx := attempt - 1
+	if idx >= len(schedule) {
+		idx = len(schedule) - 1
+	}
+	delay := time.Duration(schedule[idx]) * time.Second
+	t := time.Now().Add(delay)
+	return &t
+}
+
+// sfPolicyForMessage looks up the SF policy ID from the routing engine for this message.
+// Returns empty string if no policy is configured.
+func (r *RetryScheduler) sfPolicyForMessage(ctx context.Context, m store.Message) string {
+	msg := storeToCodecMessage(m)
+	decision, err := r.f.engine.Route(msg)
+	if err != nil {
+		return ""
+	}
+	return decision.SFPolicyID
+}
+
+// storeToCodecMessage converts a store.Message back to a codec.Message for re-dispatch.
+func storeToCodecMessage(m store.Message) *codec.Message {
+	msg := &codec.Message{
+		ID:               m.ID,
+		IngressInterface: codec.InterfaceType(m.OriginIface),
+		EgressInterface:  codec.InterfaceType(m.EgressIface),
+		IngressPeer:      m.OriginPeer,
+		Encoding:         tpdu.ParseDCS(byte(m.DCS)),
+		DCS:              byte(m.DCS),
+	}
+	if m.Encoding != 0 {
+		msg.Encoding = codec.Encoding(m.Encoding)
+	}
+	msg.Source.MSISDN = m.SrcMSISDN
+	msg.Destination.MSISDN = m.DstMSISDN
+	if len(m.Payload) > 0 {
+		msg.Binary = append([]byte(nil), m.Payload...)
+	}
+	if len(m.UDH) > 0 {
+		msg.UDH = &codec.UDH{Raw: append([]byte(nil), m.UDH...)}
+	}
+	if m.TPMR != nil {
+		msg.TPMR = byte(*m.TPMR)
+	}
+	if m.ExpiryAt != nil {
+		t := *m.ExpiryAt
+		msg.Expiry = &t
+	}
+	return msg
+}

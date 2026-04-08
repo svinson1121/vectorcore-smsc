@@ -1,0 +1,82 @@
+package codec
+
+import "time"
+
+// InterfaceType identifies which protocol interface a message arrived on or will leave from.
+type InterfaceType string
+
+const (
+	InterfaceSIP3GPP   InterfaceType = "sip3gpp"
+	InterfaceSIPSimple InterfaceType = "sipsimple"
+	InterfaceSMPP      InterfaceType = "smpp"
+	InterfaceSGd       InterfaceType = "sgd"
+)
+
+// Encoding describes the character encoding of the message payload.
+type Encoding int
+
+const (
+	EncodingGSM7   Encoding = iota // GSM 03.38 default alphabet (7-bit packed)
+	EncodingUCS2                   // UCS-2 / UTF-16BE
+	EncodingUTF8                   // Internal representation after decode
+	EncodingBinary                 // 8-bit binary / data
+)
+
+// Address holds all address representations for a message endpoint.
+type Address struct {
+	MSISDN string // E.164 digits without leading +, e.g. "14155551234"
+	IMSI   string // IMSI digits, e.g. "311435000070570"
+	SIPURI string // Full SIP URI, e.g. "sip:+14155551234@ims.example.com"
+	Alpha  string // Alphanumeric sender ID (SMPP source)
+	TON    byte   // SMPP Type of Number
+	NPI    byte   // SMPP Numbering Plan Indicator
+}
+
+// ConcatInfo carries the UDH concatenation reference for a message segment.
+type ConcatInfo struct {
+	Ref      uint16 // Reference number (8-bit or 16-bit from UDH)
+	Total    uint8  // Total number of segments
+	Sequence uint8  // This segment's sequence number (1-based)
+}
+
+// UDH holds the decoded User Data Header.
+type UDH struct {
+	Raw    []byte
+	Concat *ConcatInfo // non-nil if a concat IE was present
+}
+
+// Message is the canonical internal representation of an SMS across all four interfaces.
+// All codecs convert to and from this type; the routing engine and forwarder operate
+// exclusively on *Message.
+type Message struct {
+	ID          string
+	SMPPMsgID   string // SMPP protocol message-id (submit_sm_resp), separate from internal DB ID
+	Source      Address
+	Destination Address
+
+	// Decoded text payload (EncodingGSM7 / EncodingUCS2 / EncodingUTF8).
+	// Always UTF-8 internally; re-encoded on egress.
+	Text string
+	// Raw binary payload (EncodingBinary).
+	Binary []byte
+
+	Encoding Encoding
+	DCS      byte // Raw DCS byte from TP-DATA / SMPP
+
+	UDH    *UDH
+	Concat *ConcatInfo // non-nil for segmented messages (mirrors UDH.Concat)
+
+	// TP-DATA fields
+	TPMR           byte           // TP-MR — message reference
+	RPMR           byte           // RP-MR — relay-protocol message reference
+	TPSRRequired   bool           // TP-SRR — delivery report requested
+	ValidityPeriod *time.Duration // TP-VP decoded value (nil = no VP)
+
+	// Routing metadata (populated by ingress handlers)
+	IngressInterface InterfaceType
+	EgressInterface  InterfaceType
+	IngressPeer      string
+
+	Timestamp time.Time
+	Expiry    *time.Time
+}
