@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from 'recharts'
-import { Activity, MessageSquare, Clock, CheckCircle, XCircle, RefreshCw } from 'lucide-react'
+import { Activity, MessageSquare, Clock, XCircle, RefreshCw } from 'lucide-react'
 import StatCard from '../components/StatCard.jsx'
 import Badge from '../components/Badge.jsx'
 import Spinner from '../components/Spinner.jsx'
@@ -158,9 +158,9 @@ export default function Dashboard() {
         <StatCard
           title="Uptime"
           value={formatUptime(status?.uptime_sec)}
-          icon={<CheckCircle size={18} />}
-          color="var(--text-muted)"
-          subtitle={`v${status?.version || '—'}`}
+          icon={<Clock size={18} />}
+          color="var(--warning)"
+          subtitle={status?.started_at ? `since ${new Date(status.started_at).toLocaleString()}` : undefined}
         />
       </div>
 

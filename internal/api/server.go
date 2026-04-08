@@ -89,6 +89,7 @@ func (s *Server) Handler() http.Handler {
 		Version       string    `json:"version"`
 		Uptime        string    `json:"uptime"`
 		UptimeSec     float64   `json:"uptime_sec"`
+		StartedAt     time.Time `json:"started_at"`
 		MessageCounts msgCounts `json:"message_counts"`
 	}
 	huma.Register(api, huma.Operation{
@@ -103,6 +104,7 @@ func (s *Server) Handler() http.Handler {
 			Version:   s.version,
 			Uptime:    up.Round(time.Second).String(),
 			UptimeSec: up.Seconds(),
+			StartedAt: s.startAt,
 		}
 		if counts, err := s.st.CountMessagesByStatus(ctx); err == nil {
 			body.MessageCounts = msgCounts{
