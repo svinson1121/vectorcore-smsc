@@ -1,7 +1,7 @@
 .PHONY: ui build test clean dev-ui all install uninstall
 
 BINARY  = smsc
-VERSION = 0.2.5b
+VERSION = 0.3.0b
 PREFIX  = /opt/vectorcore
 BINDIR  = $(PREFIX)/bin
 ETCDIR  = $(PREFIX)/etc

@@ -53,6 +53,8 @@ func Open(ctx context.Context, dsn string) (*DB, error) {
 	// diameter_peers: add applications (JSON array text) alongside legacy application column.
 	pool.Exec(ctx, `ALTER TABLE diameter_peers ADD COLUMN IF NOT EXISTS applications TEXT NOT NULL DEFAULT '[]'`)
 	pool.Exec(ctx, `UPDATE diameter_peers SET applications = json_build_array(application)::text WHERE applications = '[]'`)
+	pool.Exec(ctx, `ALTER TABLE smpp_clients ADD COLUMN IF NOT EXISTS transport TEXT NOT NULL DEFAULT 'tcp'`)
+	pool.Exec(ctx, `ALTER TABLE smpp_clients ADD COLUMN IF NOT EXISTS verify_server_cert BOOLEAN NOT NULL DEFAULT false`)
 	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS udh BYTEA`)
 	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS encoding SMALLINT`)
 	// Crash recovery: messages stuck in DISPATCHED state (server died mid-send)

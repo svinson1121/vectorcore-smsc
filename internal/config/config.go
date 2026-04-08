@@ -33,7 +33,9 @@ type SMSCConfig struct {
 }
 
 type SMPPConfig struct {
-	Server SMPPServerConfig `yaml:"server"`
+	Server            SMPPServerConfig            `yaml:"server"`
+	ServerTLS         SMPPServerTLSConfig         `yaml:"server_tls"`
+	OutboundClientTLS SMPPOutboundClientTLSConfig `yaml:"outbound_client_tls"`
 }
 
 type SMPPServerConfig struct {
@@ -43,6 +45,23 @@ type SMPPServerConfig struct {
 	MaxConnections      int           `yaml:"max_connections"`
 	EnquireLinkInterval time.Duration `yaml:"enquire_link_interval"`
 	ResponseTimeout     time.Duration `yaml:"response_timeout"`
+}
+
+type SMPPServerTLSConfig struct {
+	Address string `yaml:"address"`
+	Port    int    `yaml:"port"`
+	Listen  string `yaml:"listen"` // optional explicit listener; address+port preferred
+
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+
+	RequireClientCert bool   `yaml:"require_client_cert"`
+	VerifyClientCert  bool   `yaml:"verify_client_cert"`
+	ClientCAFile      string `yaml:"client_ca_file"`
+}
+
+type SMPPOutboundClientTLSConfig struct {
+	ServerCAFile string `yaml:"server_ca_file"`
 }
 
 type SIPConfig struct {
@@ -119,6 +138,17 @@ func (c *Config) applyDefaults() {
 	if c.SMPP.Server.ResponseTimeout == 0 {
 		c.SMPP.Server.ResponseTimeout = 10 * time.Second
 	}
+	if c.SMPP.ServerTLS.Address != "" || c.SMPP.ServerTLS.Port != 0 {
+		addr := c.SMPP.ServerTLS.Address
+		if addr == "" {
+			addr = "0.0.0.0"
+		}
+		port := c.SMPP.ServerTLS.Port
+		if port == 0 {
+			port = 3550
+		}
+		c.SMPP.ServerTLS.Listen = net.JoinHostPort(addr, strconv.Itoa(port))
+	}
 	if c.SIP.Address != "" || c.SIP.Port != 0 {
 		addr := c.SIP.Address
 		if addr == "" {
@@ -192,4 +222,32 @@ func (c *Config) applyDefaults() {
 	if c.API.Listen == "" {
 		c.API.Listen = "0.0.0.0:8080"
 	}
+}
+
+func (c *Config) SMPPServerTLSListen() string {
+	return c.SMPP.ServerTLS.Listen
+}
+
+func (c *Config) SMPPServerTLSCertFile() string {
+	return c.SMPP.ServerTLS.CertFile
+}
+
+func (c *Config) SMPPServerTLSKeyFile() string {
+	return c.SMPP.ServerTLS.KeyFile
+}
+
+func (c *Config) SMPPServerTLSRequireClientCert() bool {
+	return c.SMPP.ServerTLS.RequireClientCert
+}
+
+func (c *Config) SMPPServerTLSVerifyClientCert() bool {
+	return c.SMPP.ServerTLS.VerifyClientCert
+}
+
+func (c *Config) SMPPServerTLSClientCAFile() string {
+	return c.SMPP.ServerTLS.ClientCAFile
+}
+
+func (c *Config) SMPPOutboundServerCAFile() string {
+	return c.SMPP.OutboundClientTLS.ServerCAFile
 }

@@ -38,6 +38,7 @@ type Link struct {
 	SystemID    string
 	BindType    string // "transceiver" | "transmitter" | "receiver"
 	Mode        string // "client" | "server"
+	Transport   string
 	RemoteAddr  string
 	ConnectedAt time.Time
 
@@ -49,12 +50,13 @@ type Link struct {
 	pending map[uint32]chan *PDU
 }
 
-func NewLink(name, systemID, bindType, mode, remoteAddr string, conn *Conn, state LinkState) *Link {
+func NewLink(name, systemID, bindType, mode, transport, remoteAddr string, conn *Conn, state LinkState) *Link {
 	return &Link{
 		Name:        name,
 		SystemID:    systemID,
 		BindType:    bindType,
 		Mode:        mode,
+		Transport:   transport,
 		RemoteAddr:  remoteAddr,
 		ConnectedAt: time.Now(),
 		conn:        conn,

@@ -61,6 +61,8 @@ func Open(ctx context.Context, dsn string, pollInterval time.Duration) (*DB, err
 	sqlDB.ExecContext(ctx, `ALTER TABLE diameter_peers ADD COLUMN applications TEXT NOT NULL DEFAULT '[]'`)
 	// Migrate existing single-value rows to JSON array form.
 	sqlDB.ExecContext(ctx, `UPDATE diameter_peers SET applications = json_array(application) WHERE applications = '[]'`)
+	sqlDB.ExecContext(ctx, `ALTER TABLE smpp_clients ADD COLUMN transport TEXT NOT NULL DEFAULT 'tcp'`)
+	sqlDB.ExecContext(ctx, `ALTER TABLE smpp_clients ADD COLUMN verify_server_cert INTEGER NOT NULL DEFAULT 0`)
 	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN udh BLOB`)
 	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN encoding INTEGER`)
 	// Crash recovery: messages stuck in DISPATCHED state (server died mid-send)

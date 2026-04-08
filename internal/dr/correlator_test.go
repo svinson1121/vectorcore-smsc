@@ -38,7 +38,7 @@ func (d dummyAddr) String() string  { return string(d) }
 
 func TestReportSMPPServerLinkDoesNotWaitForResponse(t *testing.T) {
 	conn := &captureConn{writes: make(chan *smpp.PDU, 1)}
-	link := smpp.NewLink("peer-a", "peer-a", "transceiver", "server", "remote", smpp.NewConn(conn), smpp.StateBound)
+	link := smpp.NewLink("peer-a", "peer-a", "transceiver", "server", "tcp", "remote", smpp.NewConn(conn), smpp.StateBound)
 	reg := smpp.NewRegistry()
 	reg.Add(link)
 

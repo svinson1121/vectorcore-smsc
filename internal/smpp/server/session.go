@@ -32,6 +32,13 @@ type session struct {
 // SessionConfig holds per-session settings derived from the server config.
 type SessionConfig struct {
 	MaxConnections int
+	Transport      string
+}
+
+func (c *SessionConfig) applyDefaults(defaultTransport string) {
+	if c.Transport == "" {
+		c.Transport = defaultTransport
+	}
 }
 
 func newSession(conn net.Conn, auth *Authenticator, reg *smpp.Registry,
@@ -115,7 +122,7 @@ func (s *session) run() {
 	if linkName == "" {
 		linkName = pdu.SystemID
 	}
-	link := smpp.NewLink(linkName, pdu.SystemID, bindType, "server", remote, sc, smpp.StateBound)
+	link := smpp.NewLink(linkName, pdu.SystemID, bindType, "server", s.cfg.Transport, remote, sc, smpp.StateBound)
 	s.reg.Add(link)
 	defer func() {
 		link.SetState(smpp.StateDisconnected)

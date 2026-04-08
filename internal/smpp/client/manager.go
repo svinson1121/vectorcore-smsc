@@ -19,17 +19,19 @@ type Manager struct {
 	st    store.Store
 	reg   *smpp.Registry
 	onMsg OnMessageFunc
+	tls   TLSOptions
 
 	mu       sync.Mutex
 	sessions map[string]*Session // keyed by client ID
 }
 
 // NewManager creates a Manager.
-func NewManager(st store.Store, reg *smpp.Registry, onMsg OnMessageFunc) *Manager {
+func NewManager(st store.Store, reg *smpp.Registry, onMsg OnMessageFunc, tlsOpts TLSOptions) *Manager {
 	return &Manager{
 		st:       st,
 		reg:      reg,
 		onMsg:    onMsg,
+		tls:      tlsOpts,
 		sessions: make(map[string]*Session),
 	}
 }
@@ -143,6 +145,8 @@ func smppClientRuntimeEqual(a, b store.SMPPClient) bool {
 		a.Name == b.Name &&
 		a.Host == b.Host &&
 		a.Port == b.Port &&
+		a.Transport == b.Transport &&
+		a.VerifyServerCert == b.VerifyServerCert &&
 		a.SystemID == b.SystemID &&
 		a.Password == b.Password &&
 		a.BindType == b.BindType &&
@@ -159,7 +163,7 @@ func (m *Manager) startSession(ctx context.Context, c store.SMPPClient) {
 }
 
 func (m *Manager) startSessionLocked(ctx context.Context, c store.SMPPClient) {
-	sess := newSession(c, m.reg, m.onMsg)
+	sess := newSession(c, m.reg, m.onMsg, m.tls)
 	m.sessions[c.ID] = sess
 	sess.start(ctx)
 }

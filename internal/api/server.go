@@ -22,6 +22,7 @@ type PeerInfo struct {
 	Name        string     `json:"name"`
 	Type        string     `json:"type"`  // smpp_server | smpp_client | diameter_peer
 	State       string     `json:"state"` // BOUND | DISCONNECTED | CONNECTING | OPEN | CLOSED | etc.
+	Transport   string     `json:"transport,omitempty"`
 	SystemID    string     `json:"system_id,omitempty"`
 	BindType    string     `json:"bind_type,omitempty"`
 	RemoteAddr  string     `json:"remote_addr,omitempty"`

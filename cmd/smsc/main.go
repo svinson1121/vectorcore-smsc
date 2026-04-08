@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"io"
@@ -39,8 +41,9 @@ import (
 	sqlitestore "github.com/svinson1121/vectorcore-smsc/internal/store/sqlite"
 )
 
-// version is overridden at build time via -ldflags "-X main.version=..."
-var version = "0.2.5b"
+// version is injected by the Makefile via -ldflags.
+// It falls back to "dev" when built outside the Makefile.
+var version = "dev"
 
 func appIDsForDiameterPeer(apps []string) []uint32 {
 	appIDs := make([]uint32, 0, len(apps))
@@ -86,6 +89,56 @@ func sameAppIDSet(current diameter.Config, want []uint32) bool {
 
 func shouldReplaceHSSPeer(current *diameter.Peer, currentHasSGd bool, want *store.DiameterPeer, wantHasSGd bool) bool {
 	return shouldReplaceDiameterPeer(current, currentHasSGd, want, wantHasSGd, want.Applications)
+}
+
+func buildInboundSMPPTLSConfig(cfg *config.Config) (*tls.Config, error) {
+	if cfg.SMPPServerTLSListen() == "" {
+		return nil, nil
+	}
+	certFile := cfg.SMPPServerTLSCertFile()
+	keyFile := cfg.SMPPServerTLSKeyFile()
+	if certFile == "" || keyFile == "" {
+		return nil, fmt.Errorf("smpp.server_tls requires cert_file and key_file")
+	}
+
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load SMPP TLS keypair: %w", err)
+	}
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+
+	verifyClientCert := cfg.SMPPServerTLSVerifyClientCert()
+	requireClientCert := cfg.SMPPServerTLSRequireClientCert()
+	clientCAFile := cfg.SMPPServerTLSClientCAFile()
+	if verifyClientCert {
+		if clientCAFile == "" {
+			return nil, fmt.Errorf("smpp.server_tls.verify_client_cert requires smpp.server_tls.client_ca_file")
+		}
+		pem, err := os.ReadFile(clientCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read SMPP client CA file %q: %w", clientCAFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("parse SMPP client CA file %q: no certificates found", clientCAFile)
+		}
+		tlsCfg.ClientCAs = pool
+	}
+
+	switch {
+	case requireClientCert && verifyClientCert:
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	case requireClientCert:
+		tlsCfg.ClientAuth = tls.RequireAnyClientCert
+	case verifyClientCert:
+		tlsCfg.ClientAuth = tls.VerifyClientCertIfGiven
+	}
+
+	return tlsCfg, nil
 }
 
 func shouldReplaceDiameterPeer(current *diameter.Peer, currentHasSGd bool, want *store.DiameterPeer, wantHasSGd bool, wantApps []string) bool {
@@ -225,7 +278,9 @@ func run(cfgPath string) error {
 	)
 
 	// ── SMPP Client Manager (not started yet — callback set after forwarder) ──
-	clientMgr := smppClient.NewManager(st, smppReg, nil)
+	clientMgr := smppClient.NewManager(st, smppReg, nil, smppClient.TLSOptions{
+		OutboundCAFile: cfg.SMPPOutboundServerCAFile(),
+	})
 
 	// ── DR Correlator ─────────────────────────────────────────────────────────
 	correlator := dr.New(st, clientMgr, smppReg, scAddr)
@@ -319,9 +374,24 @@ func run(cfgPath string) error {
 		cfg.SMPP.Server.Listen,
 		smppAuth,
 		smppReg,
-		smppServer.SessionConfig{MaxConnections: cfg.SMPP.Server.MaxConnections},
+		smppServer.SessionConfig{MaxConnections: cfg.SMPP.Server.MaxConnections, Transport: "tcp"},
 		onSMPPServerMessage,
 	)
+	var smppTLSListener *smppServer.Listener
+	if cfg.SMPPServerTLSListen() != "" {
+		tlsCfg, err := buildInboundSMPPTLSConfig(cfg)
+		if err != nil {
+			return fmt.Errorf("configure SMPP TLS listener: %w", err)
+		}
+		smppTLSListener = smppServer.NewTLSListener(
+			cfg.SMPPServerTLSListen(),
+			smppAuth,
+			smppReg,
+			smppServer.SessionConfig{MaxConnections: cfg.SMPP.Server.MaxConnections, Transport: "tls"},
+			tlsCfg,
+			onSMPPServerMessage,
+		)
+	}
 
 	// SIP ISC handler: SIP MESSAGE from S-CSCF
 	msgHandler := &isc.MessageHandler{
@@ -703,6 +773,7 @@ func run(cfgPath string) error {
 				Name:        name,
 				Type:        t,
 				State:       link.State().String(),
+				Transport:   link.Transport,
 				SystemID:    link.SystemID,
 				BindType:    link.BindType,
 				RemoteAddr:  link.RemoteAddr,
@@ -738,16 +809,20 @@ func run(cfgPath string) error {
 	})
 
 	// ── Start listeners ───────────────────────────────────────────────────────
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 5)
 
 	go func() { errCh <- sipSrv.ListenAndServe(ctx, cfg.SIP.Transport, cfg.SIP.Listen) }()
 	go func() { errCh <- smppListener.ListenAndServe(ctx) }()
+	if smppTLSListener != nil {
+		go func() { errCh <- smppTLSListener.ListenAndServe(ctx) }()
+	}
 	go func() { errCh <- sgdServer.ListenAndServe(ctx) }()
 	go func() { errCh <- apiSrv.Start(ctx, cfg.API.Listen) }()
 
 	slog.Info("VectorCore SMSC started",
 		"sip", cfg.SIP.Listen,
 		"smpp", cfg.SMPP.Server.Listen,
+		"smpp_tls", cfg.SMPPServerTLSListen(),
 		"diameter", cfg.Diameter.Listen,
 		"api", cfg.API.Listen,
 		"db", cfg.Database.Driver,

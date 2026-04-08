@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS smpp_clients (
     name                TEXT NOT NULL UNIQUE,
     host                TEXT NOT NULL,
     port                INT NOT NULL,
+    transport           TEXT NOT NULL DEFAULT 'tcp' CHECK (transport IN ('tcp','tls')),
+    verify_server_cert  BOOLEAN NOT NULL DEFAULT false,
     system_id           TEXT NOT NULL,
     password            TEXT NOT NULL,
     bind_type           TEXT NOT NULL CHECK (bind_type IN ('transmitter','receiver','transceiver')),

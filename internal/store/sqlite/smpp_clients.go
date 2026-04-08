@@ -12,7 +12,7 @@ import (
 
 func (db *DB) GetSMPPClient(ctx context.Context, id string) (*store.SMPPClient, error) {
 	const q = `
-		SELECT id, name, host, port, system_id, password,
+		SELECT id, name, host, port, transport, verify_server_cert, system_id, password,
 		       bind_type, reconnect_interval, throughput_limit,
 		       enabled, created_at, updated_at
 		FROM smpp_clients WHERE id = ?`
@@ -30,12 +30,12 @@ func (db *DB) GetSMPPClient(ctx context.Context, id string) (*store.SMPPClient, 
 func (db *DB) CreateSMPPClient(ctx context.Context, c store.SMPPClient) error {
 	const q = `
 		INSERT INTO smpp_clients
-			(id, name, host, port, system_id, password, bind_type,
+			(id, name, host, port, transport, verify_server_cert, system_id, password, bind_type,
 			 reconnect_interval, throughput_limit, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err := db.db.ExecContext(ctx, q,
-		newUUID(), c.Name, c.Host, c.Port, c.SystemID, c.Password, c.BindType,
-		c.ReconnectInterval.String(), c.ThroughputLimit, boolInt(c.Enabled))
+		newUUID(), c.Name, c.Host, c.Port, c.Transport, boolInt(c.VerifyServerCert),
+		c.SystemID, c.Password, c.BindType, c.ReconnectInterval.String(), c.ThroughputLimit, boolInt(c.Enabled))
 	if err != nil {
 		return fmt.Errorf("create smpp_client: %w", err)
 	}
@@ -48,6 +48,8 @@ func (db *DB) UpdateSMPPClient(ctx context.Context, c store.SMPPClient) error {
 			name               = ?,
 			host               = ?,
 			port               = ?,
+			transport          = ?,
+			verify_server_cert = ?,
 			system_id          = ?,
 			password           = ?,
 			bind_type          = ?,
@@ -57,7 +59,8 @@ func (db *DB) UpdateSMPPClient(ctx context.Context, c store.SMPPClient) error {
 			updated_at         = datetime('now')
 		WHERE id = ?`
 	_, err := db.db.ExecContext(ctx, q,
-		c.Name, c.Host, c.Port, c.SystemID, c.Password, c.BindType,
+		c.Name, c.Host, c.Port, c.Transport, boolInt(c.VerifyServerCert),
+		c.SystemID, c.Password, c.BindType,
 		c.ReconnectInterval.String(), c.ThroughputLimit, boolInt(c.Enabled), c.ID)
 	if err != nil {
 		return fmt.Errorf("update smpp_client %s: %w", c.ID, err)
@@ -75,7 +78,7 @@ func (db *DB) DeleteSMPPClient(ctx context.Context, id string) error {
 
 func (db *DB) ListSMPPClients(ctx context.Context) ([]store.SMPPClient, error) {
 	const q = `
-		SELECT id, name, host, port, system_id, password,
+		SELECT id, name, host, port, transport, verify_server_cert, system_id, password,
 		       bind_type, reconnect_interval, throughput_limit,
 		       enabled, created_at, updated_at
 		FROM smpp_clients
@@ -100,10 +103,10 @@ func (db *DB) ListSMPPClients(ctx context.Context) ([]store.SMPPClient, error) {
 
 func scanSMPPClient(row sqlScanner) (*store.SMPPClient, error) {
 	var c store.SMPPClient
-	var enabled int
+	var enabled, verifyServerCert int
 	var reconnectStr, createdStr, updatedStr string
 	err := row.Scan(
-		&c.ID, &c.Name, &c.Host, &c.Port, &c.SystemID, &c.Password,
+		&c.ID, &c.Name, &c.Host, &c.Port, &c.Transport, &verifyServerCert, &c.SystemID, &c.Password,
 		&c.BindType, &reconnectStr, &c.ThroughputLimit,
 		&enabled, &createdStr, &updatedStr,
 	)
@@ -111,6 +114,10 @@ func scanSMPPClient(row sqlScanner) (*store.SMPPClient, error) {
 		return nil, err
 	}
 	c.Enabled = enabled != 0
+	c.VerifyServerCert = verifyServerCert != 0
+	if c.Transport == "" {
+		c.Transport = "tcp"
+	}
 	c.ReconnectInterval = parseSQLiteInterval(reconnectStr)
 	c.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
 	c.UpdatedAt, _ = time.Parse(time.RFC3339, updatedStr)

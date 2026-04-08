@@ -3,10 +3,15 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/svinson1121/vectorcore-smsc/internal/codec"
@@ -33,18 +38,24 @@ type Session struct {
 	cfg   store.SMPPClient
 	reg   *smpp.Registry
 	onMsg OnMessageFunc
+	tls   TLSOptions
 
 	stopCh   chan struct{}
 	doneCh   chan struct{}
 	stopOnce sync.Once
 }
 
+type TLSOptions struct {
+	OutboundCAFile string
+}
+
 // newSession creates a Session for the given client configuration.
-func newSession(cfg store.SMPPClient, reg *smpp.Registry, onMsg OnMessageFunc) *Session {
+func newSession(cfg store.SMPPClient, reg *smpp.Registry, onMsg OnMessageFunc, tlsOpts TLSOptions) *Session {
 	return &Session{
 		cfg:    cfg,
 		reg:    reg,
 		onMsg:  onMsg,
+		tls:    tlsOpts,
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
 	}
@@ -117,9 +128,10 @@ func (s *Session) run(ctx context.Context) {
 
 func (s *Session) connect(ctx context.Context) error {
 	addr := net.JoinHostPort(s.cfg.Host, fmt.Sprintf("%d", s.cfg.Port))
-	slog.Info("smpp client connecting", "name", s.cfg.Name, "addr", addr)
+	transport := s.transport()
+	slog.Info("smpp client connecting", "name", s.cfg.Name, "addr", addr, "transport", transport)
 
-	netConn, err := net.DialTimeout("tcp", addr, dialTimeout)
+	netConn, err := s.dialConn(addr)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -162,9 +174,10 @@ func (s *Session) connect(ctx context.Context) error {
 		"name", s.cfg.Name,
 		"system_id", s.cfg.SystemID,
 		"bind_type", bindType,
+		"transport", transport,
 	)
 
-	link := smpp.NewLink(s.cfg.Name, s.cfg.SystemID, bindType, "client", addr, conn, smpp.StateBound)
+	link := smpp.NewLink(s.cfg.Name, s.cfg.SystemID, bindType, "client", transport, addr, conn, smpp.StateBound)
 	s.reg.Add(link)
 	defer func() {
 		link.SetState(smpp.StateDisconnected)
@@ -174,6 +187,56 @@ func (s *Session) connect(ctx context.Context) error {
 	}()
 
 	return s.readLoop(ctx, conn, link)
+}
+
+func (s *Session) transport() string {
+	transport := strings.ToLower(strings.TrimSpace(s.cfg.Transport))
+	if transport == "" {
+		return "tcp"
+	}
+	return transport
+}
+
+func (s *Session) dialConn(addr string) (net.Conn, error) {
+	if s.transport() != "tls" {
+		return net.DialTimeout("tcp", addr, dialTimeout)
+	}
+
+	tlsCfg, err := s.clientTLSConfig()
+	if err != nil {
+		return nil, err
+	}
+	dialer := &net.Dialer{Timeout: dialTimeout}
+	return tls.DialWithDialer(dialer, "tcp", addr, tlsCfg)
+}
+
+func (s *Session) clientTLSConfig() (*tls.Config, error) {
+	cfg := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: !s.cfg.VerifyServerCert,
+	}
+
+	if s.cfg.VerifyServerCert && net.ParseIP(s.cfg.Host) == nil {
+		cfg.ServerName = s.cfg.Host
+	}
+	if strings.TrimSpace(s.tls.OutboundCAFile) == "" {
+		return cfg, nil
+	}
+
+	pem, err := os.ReadFile(s.tls.OutboundCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read outbound CA file %q: %w", s.tls.OutboundCAFile, err)
+	}
+
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("parse outbound CA file %q: no certificates found", s.tls.OutboundCAFile)
+	}
+	cfg.RootCAs = pool
+	return cfg, nil
 }
 
 func (s *Session) readLoop(ctx context.Context, conn *smpp.Conn, link *smpp.Link) error {
@@ -238,8 +301,11 @@ func (s *Session) readLoop(ctx context.Context, conn *smpp.Conn, link *smpp.Link
 				})
 				return fmt.Errorf("remote requested unbind")
 
+			case smpp.CmdSubmitSM:
+				s.handleIncomingSubmit(conn, link, pdu)
+
 			case smpp.CmdDeliverSM:
-				s.handleIncoming(conn, link, pdu)
+				s.handleIncomingDeliver(conn, link, pdu)
 
 			default:
 				if !link.DispatchPending(pdu) {
@@ -299,7 +365,9 @@ func (s *Session) gracefulUnbind(conn *smpp.Conn, link *smpp.Link, pduCh <-chan 
 					SequenceNumber: pdu.SequenceNumber,
 				})
 			case smpp.CmdDeliverSM:
-				s.handleIncoming(conn, link, pdu)
+				s.handleIncomingDeliver(conn, link, pdu)
+			case smpp.CmdSubmitSM:
+				s.handleIncomingSubmit(conn, link, pdu)
 			default:
 				if !link.DispatchPending(pdu) {
 					slog.Debug("smpp client unhandled PDU during unbind",
@@ -312,16 +380,39 @@ func (s *Session) gracefulUnbind(conn *smpp.Conn, link *smpp.Link, pduCh <-chan 
 	}
 }
 
-// handleIncoming decodes a deliver_sm (incoming message or DR from remote SMSC)
+// handleIncomingDeliver decodes a deliver_sm (incoming message or DR from remote SMSC)
 // and fires the OnMessage callback.
-func (s *Session) handleIncoming(conn *smpp.Conn, link *smpp.Link, pdu *smpp.PDU) {
-	// Respond immediately
-	_ = conn.WritePDU(&smpp.PDU{
+func (s *Session) handleIncomingDeliver(conn *smpp.Conn, link *smpp.Link, pdu *smpp.PDU) {
+	if err := conn.WritePDU(&smpp.PDU{
 		CommandID:      smpp.CmdDeliverSMResp,
 		CommandStatus:  smpp.ESME_ROK,
 		SequenceNumber: pdu.SequenceNumber,
-	})
+	}); err != nil {
+		slog.Warn("smpp client deliver_sm_resp write failed", "name", s.cfg.Name, "err", err)
+		return
+	}
 
+	s.dispatchIncoming(link, pdu, "")
+}
+
+// handleIncomingSubmit decodes a submit_sm received on an outbound transceiver
+// connection and responds with submit_sm_resp.
+func (s *Session) handleIncomingSubmit(conn *smpp.Conn, link *smpp.Link, pdu *smpp.PDU) {
+	resp := &smpp.PDU{
+		CommandID:      smpp.CmdSubmitSMResp,
+		CommandStatus:  smpp.ESME_ROK,
+		SequenceNumber: pdu.SequenceNumber,
+		MessageID:      generateMsgID(),
+	}
+	if err := conn.WritePDU(resp); err != nil {
+		slog.Warn("smpp client submit_sm_resp write failed", "name", s.cfg.Name, "err", err)
+		return
+	}
+
+	s.dispatchIncoming(link, pdu, resp.MessageID)
+}
+
+func (s *Session) dispatchIncoming(link *smpp.Link, pdu *smpp.PDU, smppMsgID string) {
 	if s.onMsg == nil {
 		return
 	}
@@ -342,6 +433,7 @@ func (s *Session) handleIncoming(conn *smpp.Conn, link *smpp.Link, pdu *smpp.PDU
 
 	msg.IngressInterface = codec.InterfaceSMPP
 	msg.IngressPeer = s.cfg.Name
+	msg.SMPPMsgID = smppMsgID
 	s.onMsg(msg, link, s.cfg.Name)
 }
 
@@ -359,4 +451,21 @@ func bindCmds(bindType string) (reqCmd, respCmd uint32) {
 	default:
 		return smpp.CmdBindTransceiver, smpp.CmdBindTransceiverResp
 	}
+}
+
+var smppMsgIDCounter atomic.Uint64
+
+func generateMsgID() string {
+	id := smppMsgIDCounter.Add(1)
+	return msgIDHex(id)
+}
+
+func msgIDHex(v uint64) string {
+	const hex = "0123456789abcdef"
+	b := make([]byte, 16)
+	for i := 15; i >= 0; i-- {
+		b[i] = hex[v&0xF]
+		v >>= 4
+	}
+	return string(b)
 }

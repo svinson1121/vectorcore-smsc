@@ -60,6 +60,8 @@ type SMPPClient struct {
 	Name              string        `json:"name"`
 	Host              string        `json:"host"`
 	Port              int           `json:"port"`
+	Transport         string        `json:"transport"`
+	VerifyServerCert  bool          `json:"verify_server_cert"`
 	SystemID          string        `json:"system_id"`
 	Password          string        `json:"-"` // never expose decrypted password over API
 	BindType          string        `json:"bind_type"`

@@ -190,11 +190,12 @@ function ConnectedTab() {
               subtitle="Server-side ESME binds and outbound SMPP client sessions"
               peers={smppPeers}
               emptyText="No SMPP connections are active."
-              columns={['Name', 'Mode', 'State', 'System ID', 'Bind Type', 'Remote', 'Since']}
+              columns={['Name', 'Mode', 'Transport', 'State', 'System ID', 'Bind Type', 'Remote', 'Since']}
               renderRow={(p, i) => (
                 <tr key={`${p.type}-${p.name}-${i}`}>
                   <td style={{ fontWeight: 600 }} className="mono">{p.name || '—'}</td>
                   <td><span className="text-muted" style={{ fontSize: '0.8rem' }}>{p.type === 'smpp_client' ? 'client' : 'server'}</span></td>
+                  <td><Badge state={p.transport || 'tcp'} /></td>
                   <td><StateDot state={p.state} /></td>
                   <td className="mono" style={{ fontSize: '0.8rem' }}>{p.system_id || '—'}</td>
                   <td className="mono" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{p.bind_type || '—'}</td>
@@ -503,6 +504,7 @@ function SMPPAccountModal({ initial, onClose, onSaved }) {
 /* ── SMPP Clients ───────────────────────────────────────────────────────────── */
 const SMPP_CLI_DEFAULTS = {
   name: '', host: '', port: 2775, system_id: '', password: '',
+  transport: 'tcp', verify_server_cert: false,
   bind_type: 'transceiver', reconnect_interval: '10s', throughput_limit: 0, enabled: true,
 }
 
@@ -554,7 +556,7 @@ function SMPPClientsTab() {
         <div className="table-container">
           <table>
             <thead><tr>
-              <th>Name</th><th>Host</th><th>System ID</th>
+              <th>Name</th><th>Host</th><th>Transport</th><th>Verify</th><th>System ID</th>
               <th>Bind Type</th><th>Reconnect</th><th>Enabled</th><th>Actions</th>
             </tr></thead>
             <tbody>
@@ -562,6 +564,8 @@ function SMPPClientsTab() {
                 <tr key={c.id}>
                   <td style={{ fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{c.name}</td>
                   <td className="mono text-muted" style={{ fontSize: '0.78rem' }}>{c.host}:{c.port}</td>
+                  <td><Badge state={c.transport || 'tcp'} /></td>
+                  <td><Badge state={String(!!c.verify_server_cert)} /></td>
                   <td className="mono" style={{ fontSize: '0.8rem' }}>{c.system_id}</td>
                   <td><Badge state={c.bind_type} /></td>
                   <td className="mono text-muted">{c.reconnect_interval || '10s'}</td>
@@ -594,10 +598,22 @@ function SMPPClientModal({ initial, onClose, onSaved }) {
   const [form, setForm] = useState(() => {
     const base = initial ? { ...SMPP_CLI_DEFAULTS, ...initial } : { ...SMPP_CLI_DEFAULTS }
     base.reconnect_interval = normalizeReconnectInterval(base.reconnect_interval)
+    base.transport = base.transport || 'tcp'
+    base.verify_server_cert = !!base.verify_server_cert
     return base
   })
   const [submitting, setSubmitting] = useState(false)
   const set = useCallback((k, v) => setForm(p => ({ ...p, [k]: v })), [])
+  const setTransport = useCallback((nextTransport) => {
+    setForm((prev) => {
+      const currentTransport = prev.transport || 'tcp'
+      const currentPort = Number(prev.port)
+      const nextPort = currentPort === (currentTransport === 'tls' ? 3550 : 2775)
+        ? (nextTransport === 'tls' ? 3550 : 2775)
+        : currentPort
+      return { ...prev, transport: nextTransport, port: nextPort }
+    })
+  }, [])
 
   const handleSubmit = useCallback(async (e) => {
     e.preventDefault()
@@ -609,6 +625,8 @@ function SMPPClientModal({ initial, onClose, onSaved }) {
         name: form.name,
         host: form.host,
         port: Number(form.port),
+        transport: form.transport || 'tcp',
+        verify_server_cert: !!form.verify_server_cert,
         system_id: form.system_id,
         bind_type: form.bind_type,
         reconnect_interval: normalizeReconnectInterval(form.reconnect_interval),
@@ -647,6 +665,7 @@ function SMPPClientModal({ initial, onClose, onSaved }) {
             <div className="form-group">
               <label className="form-label">Port</label>
               <input className="input mono" type="number" value={form.port} onChange={e => set('port', e.target.value)} />
+              <span className="form-hint">{(form.transport || 'tcp') === 'tls' ? 'Default TLS port: 3550' : 'Default TCP port: 2775'}</span>
             </div>
           </div>
           <div className="form-row">
@@ -661,6 +680,13 @@ function SMPPClientModal({ initial, onClose, onSaved }) {
           </div>
           <div className="form-row">
             <div className="form-group">
+              <label className="form-label">Transport</label>
+              <select className="select" value={form.transport || 'tcp'} onChange={e => setTransport(e.target.value)}>
+                <option value="tcp">tcp</option>
+                <option value="tls">tls</option>
+              </select>
+            </div>
+            <div className="form-group">
               <label className="form-label">Bind Type</label>
               <select className="select" value={form.bind_type} onChange={e => set('bind_type', e.target.value)}>
                 <option value="transceiver">transceiver</option>
@@ -668,9 +694,18 @@ function SMPPClientModal({ initial, onClose, onSaved }) {
                 <option value="receiver">receiver</option>
               </select>
             </div>
+          </div>
+          <div className="form-row">
             <div className="form-group">
               <label className="form-label">Reconnect Interval</label>
               <input className="input mono" value={form.reconnect_interval} onChange={e => set('reconnect_interval', e.target.value)} placeholder="10s" />
+            </div>
+            <div className="form-group">
+              <label className="form-label">TLS Verification</label>
+              <label className="checkbox-wrap" style={{ minHeight: 36 }}>
+                <input type="checkbox" checked={!!form.verify_server_cert} onChange={e => set('verify_server_cert', e.target.checked)} />
+                <span>Verify server certificate</span>
+              </label>
             </div>
           </div>
           <div className="form-group">

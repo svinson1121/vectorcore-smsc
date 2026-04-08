@@ -170,6 +170,8 @@ type smppClientInput struct {
 	Name              string `json:"name"`
 	Host              string `json:"host"`
 	Port              int    `json:"port"`
+	Transport         string `json:"transport" enum:"tcp,tls"`
+	VerifyServerCert  bool   `json:"verify_server_cert"`
 	SystemID          string `json:"system_id"`
 	Password          string `json:"password"`
 	BindType          string `json:"bind_type" enum:"transmitter,receiver,transceiver"`
@@ -182,6 +184,8 @@ type smppClientUpdateInput struct {
 	Name              string `json:"name"`
 	Host              string `json:"host"`
 	Port              int    `json:"port"`
+	Transport         string `json:"transport" enum:"tcp,tls"`
+	VerifyServerCert  bool   `json:"verify_server_cert"`
 	SystemID          string `json:"system_id"`
 	Password          string `json:"password,omitempty"`
 	BindType          string `json:"bind_type" enum:"transmitter,receiver,transceiver"`
@@ -281,8 +285,12 @@ func smppClientFromInput(b smppClientInput) (store.SMPPClient, error) {
 	if err != nil {
 		d = 10 * time.Second
 	}
+	transport := b.Transport
+	if transport == "" {
+		transport = "tcp"
+	}
 	return store.SMPPClient{
-		Name: b.Name, Host: b.Host, Port: b.Port,
+		Name: b.Name, Host: b.Host, Port: b.Port, Transport: transport, VerifyServerCert: b.VerifyServerCert,
 		SystemID: b.SystemID, Password: b.Password, BindType: b.BindType,
 		ReconnectInterval: d, ThroughputLimit: b.ThroughputLimit, Enabled: b.Enabled,
 	}, nil
@@ -293,8 +301,12 @@ func smppClientFromUpdateInput(b smppClientUpdateInput) (store.SMPPClient, error
 	if err != nil {
 		d = 10 * time.Second
 	}
+	transport := b.Transport
+	if transport == "" {
+		transport = "tcp"
+	}
 	return store.SMPPClient{
-		Name: b.Name, Host: b.Host, Port: b.Port,
+		Name: b.Name, Host: b.Host, Port: b.Port, Transport: transport, VerifyServerCert: b.VerifyServerCert,
 		SystemID: b.SystemID, Password: b.Password, BindType: b.BindType,
 		ReconnectInterval: d, ThroughputLimit: b.ThroughputLimit, Enabled: b.Enabled,
 	}, nil

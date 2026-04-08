@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"net"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +19,8 @@ type Listener struct {
 	reg        *smpp.Registry
 	cfg        SessionConfig
 	onMsg      OnMessageFunc
+	tlsConfig  *tls.Config
+	transport  string
 
 	listener net.Listener
 	active   atomic.Int32 // count of live sessions
@@ -25,24 +29,54 @@ type Listener struct {
 // NewListener creates a Listener.
 func NewListener(listenAddr string, auth *Authenticator, reg *smpp.Registry,
 	cfg SessionConfig, onMsg OnMessageFunc) *Listener {
+	cfg.applyDefaults("tcp")
 	return &Listener{
 		listenAddr: listenAddr,
 		auth:       auth,
 		reg:        reg,
 		cfg:        cfg,
 		onMsg:      onMsg,
+		transport:  cfg.Transport,
+	}
+}
+
+// NewTLSListener creates a TLS-enabled Listener.
+func NewTLSListener(listenAddr string, auth *Authenticator, reg *smpp.Registry,
+	cfg SessionConfig, tlsCfg *tls.Config, onMsg OnMessageFunc) *Listener {
+	cfg.applyDefaults("tls")
+	return &Listener{
+		listenAddr: listenAddr,
+		auth:       auth,
+		reg:        reg,
+		cfg:        cfg,
+		onMsg:      onMsg,
+		tlsConfig:  tlsCfg,
+		transport:  cfg.Transport,
 	}
 }
 
 // ListenAndServe binds the TCP socket and starts the accept loop.
 // It blocks until ctx is cancelled or a fatal accept error occurs.
 func (l *Listener) ListenAndServe(ctx context.Context) error {
-	ln, err := net.Listen("tcp", l.listenAddr)
+	transport := strings.ToLower(strings.TrimSpace(l.transport))
+	if transport == "" {
+		transport = "tcp"
+	}
+
+	var (
+		ln  net.Listener
+		err error
+	)
+	if transport == "tls" {
+		ln, err = tls.Listen("tcp", l.listenAddr, l.tlsConfig)
+	} else {
+		ln, err = net.Listen("tcp", l.listenAddr)
+	}
 	if err != nil {
 		return err
 	}
 	l.listener = ln
-	slog.Info("smpp server listening", "addr", l.listenAddr)
+	slog.Info("smpp server listening", "addr", l.listenAddr, "transport", transport)
 
 	go func() {
 		<-ctx.Done()
