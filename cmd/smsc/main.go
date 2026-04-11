@@ -486,7 +486,7 @@ func run(cfgPath string) error {
 			if msg.EgressIface != string(codec.InterfaceSGd) {
 				continue
 			}
-			if err := st.UpdateMessageRetry(ctx, msg.ID, msg.RetryCount, now); err != nil {
+			if err := st.UpdateMessageRetry(ctx, msg.ID, msg.RetryCount, now, msg.RouteCursor); err != nil {
 				slog.Warn("s6c ALSC requeue failed", "message_id", msg.ID, "msisdn", msisdn, "err", err)
 				continue
 			}

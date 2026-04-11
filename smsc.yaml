@@ -1,0 +1,82 @@
+smsc:
+  address: "+15550000000"  # SMSC E.164 / GT 
+
+smpp:
+  # Plain inbound SMPP listener. External peers connect to this socket over TCP.
+  server:
+    address: "::"
+    port: 2775
+    max_connections: 50
+    enquire_link_interval: 30s
+    response_timeout: 10s
+
+  # Inbound SMPP/TLS listener. External peers connect to this socket over TLS.
+  # Disabled unless both address/port and cert/key are configured.
+  # The files under ./test-certs are local test assets only.
+  # server_tls:
+  #   address: "::"
+  #   port: 3550
+  #   cert_file: "./test-certs/server.crt"
+  #   key_file: "./test-certs/server.key"
+  #
+  #   # If true, the connecting peer must present a client certificate.
+  #   require_client_cert: false
+  #
+  #   # If true, validate the presented client certificate against client_ca_file.
+  #   verify_client_cert: false
+  #
+  #   # CA bundle used to verify client certificates presented to this listener.
+  #   client_ca_file: "./test-certs/ca.crt"
+
+  # TLS settings for outbound SMPP client connections initiated by this SMSC.
+  # Used only when an SMPP client entry is configured with transport: tls.
+  # outbound_client_tls:
+  #   # CA bundle used to verify the remote SMPP server certificate.
+  #   server_ca_file: "./test-certs/ca.crt"
+
+sip:
+  address: "::"
+  port: 5060
+  fqdn: "smsc.ims.mnc435.mcc311.3gppnetwork.org"
+  transport: udp        # udp | tcp
+  isc:
+    # Accept-Contact header sent on ISC SIP MESSAGE requests.
+    # Typical IMS SMS-over-IP value:
+    accept_contact: "*;+g.3gpp.smsip"
+    # Example alternative if your network wants no explicit Accept-Contact:
+    # accept_contact: ""
+
+    # Request-Disposition used for MT delivery MESSAGEs sent toward the recipient UE.
+    # Common values are "no-fork" or "fork".
+    mt_request_disposition: "no-fork"
+    # Example alternative:
+    # mt_request_disposition: "fork"
+
+    # Request-Disposition used for the separate submit-report MESSAGE
+    # that carries RP-ACK / RP-ERROR back to the originating UE.
+    submit_report_request_disposition: "no-fork"
+    # Example alternative:
+    # submit_report_request_disposition: "fork"
+
+diameter:
+  address: "::"
+  port: 3868
+  transport: tcp        # tcp | sctp
+  local_fqdn: "smsc.ims.mnc435.mcc311.3gppnetwork.org"
+  local_realm: "ims.mnc435.mcc311.3gppnetwork.org"
+
+database:
+  #driver: postgres      # postgres | sqlite
+  #dsn: "postgres://smsc:smsc@localhost/vectorcore_smsc"
+  # For SQLite:
+  driver: sqlite
+  dsn: "./vectorcore_smsc.db"
+  poll_interval: 2s
+
+api:
+  address: "::"
+  port: 8080
+
+log:
+  file: "/var/log/smsc.log"   # tee to file alongside stderr; omit/blank = stderr only
+  level: "info"                   # debug | info | warn | error  (overridden by -d flag)

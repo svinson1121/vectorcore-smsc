@@ -18,8 +18,10 @@ type forwarderTestStore struct {
 	saved         *store.Message
 	routeIface    string
 	routePeer     string
+	routingCalls  int
 	statusUpdates []string
 	retryCount    int
+	routeCursor   int
 	nextRetryAt   *time.Time
 }
 
@@ -80,14 +82,20 @@ func (s *forwarderTestStore) SaveMessage(_ context.Context, msg store.Message) e
 func (s *forwarderTestStore) UpdateMessageRouting(_ context.Context, _ string, egressIface, egressPeer string) error {
 	s.routeIface = egressIface
 	s.routePeer = egressPeer
+	s.routingCalls++
+	if s.saved != nil {
+		s.saved.EgressIface = egressIface
+		s.saved.EgressPeer = egressPeer
+	}
 	return nil
 }
 func (s *forwarderTestStore) UpdateMessageStatus(_ context.Context, _ string, status string) error {
 	s.statusUpdates = append(s.statusUpdates, status)
 	return nil
 }
-func (s *forwarderTestStore) UpdateMessageRetry(_ context.Context, _ string, retryCount int, nextRetryAt time.Time) error {
+func (s *forwarderTestStore) UpdateMessageRetry(_ context.Context, _ string, retryCount int, nextRetryAt time.Time, routeCursor int) error {
 	s.retryCount = retryCount
+	s.routeCursor = routeCursor
 	s.nextRetryAt = &nextRetryAt
 	return nil
 }
@@ -229,11 +237,39 @@ func (s *forwarderTestStore) DeleteSGDMMEMapping(context.Context, string) error 
 	panic("unexpected call")
 }
 
-type fakeSimpleSender struct{ calls int }
+type fakeISCSender struct {
+	calls int
+	err   error
+	msgs  []*codec.Message
+}
+
+func (f *fakeISCSender) Send(_ context.Context, msg *codec.Message, _ *registry.Registration) error {
+	f.calls++
+	if msg != nil {
+		cp := *msg
+		if msg.Binary != nil {
+			cp.Binary = append([]byte(nil), msg.Binary...)
+		}
+		if msg.UDH != nil {
+			cp.UDH = &codec.UDH{Raw: append([]byte(nil), msg.UDH.Raw...)}
+		}
+		f.msgs = append(f.msgs, &cp)
+	}
+	return f.err
+}
+
+type fakeSimpleSender struct {
+	calls int
+	err   error
+	errs  []error
+}
 
 func (f *fakeSimpleSender) Send(context.Context, *codec.Message, store.SIPPeer) error {
 	f.calls++
-	return nil
+	if idx := f.calls - 1; idx >= 0 && idx < len(f.errs) && f.errs[idx] != nil {
+		return f.errs[idx]
+	}
+	return f.err
 }
 
 type fakeS6cClient struct {
@@ -287,7 +323,7 @@ func TestSelectRouteUsesS6cOnlyForSGdCandidates(t *testing.T) {
 	route, err := f.selectRoute(context.Background(), &codec.Message{
 		IngressInterface: codec.InterfaceSMPP,
 		Destination:      codec.Address{MSISDN: "3342012860"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("selectRoute() error = %v", err)
 	}
@@ -334,6 +370,31 @@ func TestPersistMessageStoresBinaryMetadataForSMPPIngress(t *testing.T) {
 	}
 }
 
+func TestPersistMessageStoresTextPayloadForRetry(t *testing.T) {
+	st := &forwarderTestStore{}
+	f := &Forwarder{st: st}
+	now := time.Now().UTC()
+
+	msg := &codec.Message{
+		ID:               "msg-text-1",
+		IngressInterface: codec.InterfaceSMPP,
+		Encoding:         codec.EncodingUCS2,
+		DCS:              0x08,
+		Source:           codec.Address{MSISDN: "3342012832"},
+		Destination:      codec.Address{MSISDN: "3342012860"},
+		Text:             "hello over retry",
+	}
+
+	f.persistMessage(context.Background(), msg, "sip3gpp", "peer1", store.MessageStatusQueued, now)
+
+	if st.saved == nil {
+		t.Fatal("message was not saved")
+	}
+	if got, want := string(st.saved.Payload), msg.Text; got != want {
+		t.Fatalf("saved payload text = %q, want %q", got, want)
+	}
+}
+
 func TestStoreToCodecMessageRestoresBinaryEncodingAndUDH(t *testing.T) {
 	m := store.Message{
 		ID:          "msg-2",
@@ -356,6 +417,30 @@ func TestStoreToCodecMessageRestoresBinaryEncodingAndUDH(t *testing.T) {
 	}
 	if msg.UDH == nil || string(msg.UDH.Raw) != string(m.UDH) {
 		t.Fatalf("UDH = %x, want %x", msg.UDH.Raw, m.UDH)
+	}
+}
+
+func TestStoreToCodecMessageRestoresTextPayload(t *testing.T) {
+	m := store.Message{
+		ID:          "msg-text-2",
+		OriginIface: string(codec.InterfaceSMPP),
+		EgressIface: string(codec.InterfaceSIP3GPP),
+		SrcMSISDN:   "3342012832",
+		DstMSISDN:   "3342012860",
+		Payload:     []byte("hello over retry"),
+		Encoding:    int(codec.EncodingUCS2),
+		DCS:         0x08,
+	}
+
+	msg := storeToCodecMessage(m)
+	if got, want := msg.Encoding, codec.EncodingUCS2; got != want {
+		t.Fatalf("encoding = %v, want %v", got, want)
+	}
+	if got, want := msg.Text, "hello over retry"; got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+	if len(msg.Binary) != 0 {
+		t.Fatalf("binary payload = %x, want empty", msg.Binary)
 	}
 }
 
@@ -386,7 +471,7 @@ func TestSelectRouteFallsThroughFromSGdToNextRule(t *testing.T) {
 	route, err := f.selectRoute(context.Background(), &codec.Message{
 		IngressInterface: codec.InterfaceSMPP,
 		Destination:      codec.Address{MSISDN: "3342012860"},
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("selectRoute() error = %v", err)
 	}
@@ -398,5 +483,105 @@ func TestSelectRouteFallsThroughFromSGdToNextRule(t *testing.T) {
 	}
 	if got := s6cClient.calls; got != 1 {
 		t.Fatalf("S6c calls = %d, want 1", got)
+	}
+}
+
+func TestRetryDispatchTriesNextRuleWithinSameRetryPass(t *testing.T) {
+	st := &forwarderTestStore{
+		sipPeers: map[string]store.SIPPeer{
+			"simple1": {Name: "simple1"},
+			"simple2": {Name: "simple2"},
+		},
+	}
+	reg := newTestRegistry(t, st)
+
+	engine := routing.NewEngine()
+	engine.Reload([]store.RoutingRule{
+		{Name: "rule-1", Priority: 10, MatchSrcIface: "smpp", MatchDstPrefix: "334", EgressIface: "sipsimple", EgressPeer: "simple1"},
+		{Name: "rule-2", Priority: 20, MatchSrcIface: "smpp", MatchDstPrefix: "334", EgressIface: "sipsimple", EgressPeer: "simple2"},
+	})
+
+	simpleSender := &fakeSimpleSender{errs: []error{context.DeadlineExceeded, nil}}
+	f := New(Config{
+		Registry:     reg,
+		Engine:       engine,
+		Store:        st,
+		SimpleSender: simpleSender,
+	})
+	retries := NewRetryScheduler(f, time.Second)
+
+	retries.dispatch(context.Background(), store.Message{
+		ID:          "msg-1",
+		OriginIface: string(codec.InterfaceSMPP),
+		DstMSISDN:   "3342012860",
+		SrcMSISDN:   "3342012832",
+	})
+
+	if got := st.retryCount; got != 0 {
+		t.Fatalf("retryCount = %d, want 0", got)
+	}
+	if got, want := st.routeIface, "sipsimple"; got != want {
+		t.Fatalf("routeIface = %q, want %q", got, want)
+	}
+	if got, want := st.routePeer, "simple2"; got != want {
+		t.Fatalf("routePeer = %q, want %q", got, want)
+	}
+	if got, want := st.routingCalls, 1; got != want {
+		t.Fatalf("routingCalls = %d, want %d", got, want)
+	}
+	if got, want := simpleSender.calls, 2; got != want {
+		t.Fatalf("simple sender calls = %d, want %d", got, want)
+	}
+	if len(st.statusUpdates) == 0 || st.statusUpdates[len(st.statusUpdates)-1] != store.MessageStatusDelivered {
+		t.Fatalf("final status = %v, want delivered", st.statusUpdates)
+	}
+}
+
+func TestRetryDispatchPreservesTextPayloadForISC(t *testing.T) {
+	st := &forwarderTestStore{}
+	reg := newTestRegistry(t, st)
+	if err := reg.Upsert(context.Background(), registry.Registration{
+		MSISDN:     "3342012860",
+		SIPAOR:     "sip:3342012860@example.com",
+		SCSCF:      "scscf.example.com",
+		Registered: true,
+		Expiry:     time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("registry upsert: %v", err)
+	}
+
+	iscSender := &fakeISCSender{}
+	f := New(Config{
+		Registry:  reg,
+		Engine:    routing.NewEngine(),
+		Store:     st,
+		ISCSender: iscSender,
+	})
+	retries := NewRetryScheduler(f, time.Second)
+
+	retries.dispatch(context.Background(), store.Message{
+		ID:          "msg-isc-1",
+		OriginIface: string(codec.InterfaceSMPP),
+		SrcMSISDN:   "3342012832",
+		DstMSISDN:   "3342012860",
+		Payload:     []byte("hello over retry"),
+		Encoding:    int(codec.EncodingUCS2),
+		DCS:         0x08,
+	})
+
+	if got, want := iscSender.calls, 1; got != want {
+		t.Fatalf("ISC sender calls = %d, want %d", got, want)
+	}
+	if len(iscSender.msgs) != 1 {
+		t.Fatalf("captured messages = %d, want 1", len(iscSender.msgs))
+	}
+	if got, want := iscSender.msgs[0].Text, "hello over retry"; got != want {
+		t.Fatalf("retried text = %q, want %q", got, want)
+	}
+	if len(iscSender.msgs[0].Binary) != 0 {
+		t.Fatalf("retried binary = %x, want empty", iscSender.msgs[0].Binary)
+	}
+	if len(st.statusUpdates) == 0 || st.statusUpdates[len(st.statusUpdates)-1] != store.MessageStatusDelivered {
+		t.Fatalf("final status = %v, want delivered", st.statusUpdates)
 	}
 }

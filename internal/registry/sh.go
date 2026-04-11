@@ -35,9 +35,23 @@ func (r *Registry) SetS6cClient(c S6cClient) {
 //
 // Returns (nil, nil) if the subscriber is not IMS-registered according to the HSS.
 func (r *Registry) ShLookup(ctx context.Context, msisdn string) (*Registration, error) {
-	// Fast path: cache hit
-	if reg, ok := r.Lookup(msisdn); ok {
-		return reg, nil
+	return r.shLookup(ctx, msisdn, false)
+}
+
+// ShRefresh bypasses the local cache and forces a fresh Sh lookup against HSS.
+// If the HSS reports the subscriber as unregistered or unknown, any cached IMS
+// registration for the MSISDN is removed so retries do not continue using stale
+// local IMS state.
+func (r *Registry) ShRefresh(ctx context.Context, msisdn string) (*Registration, error) {
+	return r.shLookup(ctx, msisdn, true)
+}
+
+func (r *Registry) shLookup(ctx context.Context, msisdn string, force bool) (*Registration, error) {
+	// Fast path: cache hit unless the caller explicitly requested a refresh.
+	if !force {
+		if reg, ok := r.Lookup(msisdn); ok {
+			return reg, nil
+		}
 	}
 
 	r.mu.RLock()
@@ -55,6 +69,9 @@ func (r *Registry) ShLookup(ctx context.Context, msisdn string) (*Registration, 
 		// ErrUnknownUser is not fatal — subscriber just isn't in HSS
 		var unknown *sh.ErrUnknownUser
 		if isUnknown(err, &unknown) {
+			if force {
+				_ = r.Delete(ctx, msisdn)
+			}
 			slog.Debug("registry: Sh lookup unknown subscriber", "msisdn", msisdn)
 			return nil, nil
 		}
@@ -67,6 +84,9 @@ func (r *Registry) ShLookup(ctx context.Context, msisdn string) (*Registration, 
 	}
 
 	if !result.Registered {
+		if force {
+			_ = r.Delete(ctx, msisdn)
+		}
 		slog.Debug("registry: Sh lookup — subscriber unregistered", "msisdn", msisdn)
 		return nil, nil
 	}

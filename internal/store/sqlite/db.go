@@ -65,6 +65,7 @@ func Open(ctx context.Context, dsn string, pollInterval time.Duration) (*DB, err
 	sqlDB.ExecContext(ctx, `ALTER TABLE smpp_clients ADD COLUMN verify_server_cert INTEGER NOT NULL DEFAULT 0`)
 	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN udh BLOB`)
 	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN encoding INTEGER`)
+	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN route_cursor INTEGER NOT NULL DEFAULT 0`)
 	// Crash recovery: messages stuck in DISPATCHED state (server died mid-send)
 	// are reset to QUEUED so the retry scheduler re-attempts them.
 	sqlDB.ExecContext(ctx, `UPDATE messages SET status='QUEUED', next_retry_at=datetime('now') WHERE status='DISPATCHED'`)

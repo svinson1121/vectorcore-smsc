@@ -13,13 +13,13 @@ func (db *DB) SaveMessage(ctx context.Context, msg store.Message) error {
 	const q = `
 		INSERT INTO messages (
 			id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-			egress_iface, egress_peer, src_msisdn, dst_msisdn,
+			egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 			payload, udh, encoding, dcs, status, retry_count,
 			next_retry_at, dr_required, submitted_at, expiry_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 	_, err := db.db.ExecContext(ctx, q,
 		msg.ID, msg.TPMR, msg.SMPPMsgID, msg.OriginIface, msg.OriginPeer,
-		msg.EgressIface, msg.EgressPeer, msg.SrcMSISDN, msg.DstMSISDN,
+		msg.EgressIface, msg.EgressPeer, msg.RouteCursor, msg.SrcMSISDN, msg.DstMSISDN,
 		msg.Payload, msg.UDH, msg.Encoding, msg.DCS, msg.Status, msg.RetryCount,
 		nullableTime(msg.NextRetryAt),
 		boolInt(msg.DRRequired),
@@ -59,11 +59,11 @@ func (db *DB) UpdateMessageStatus(ctx context.Context, id, status string) error 
 	return nil
 }
 
-func (db *DB) UpdateMessageRetry(ctx context.Context, id string, retryCount int, nextRetryAt time.Time) error {
+func (db *DB) UpdateMessageRetry(ctx context.Context, id string, retryCount int, nextRetryAt time.Time, routeCursor int) error {
 	_, err := db.db.ExecContext(ctx,
-		`UPDATE messages SET status=?, retry_count=?, next_retry_at=? WHERE id=?`,
+		`UPDATE messages SET status=?, retry_count=?, next_retry_at=?, route_cursor=? WHERE id=?`,
 		store.MessageStatusQueued, retryCount,
-		nextRetryAt.UTC().Format(time.RFC3339), id)
+		nextRetryAt.UTC().Format(time.RFC3339), routeCursor, id)
 	if err != nil {
 		return fmt.Errorf("update message retry %s: %w", id, err)
 	}
@@ -73,7 +73,7 @@ func (db *DB) UpdateMessageRetry(ctx context.Context, id string, retryCount int,
 func (db *DB) ListRetryableMessages(ctx context.Context) ([]store.Message, error) {
 	const q = `
 		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, src_msisdn, dst_msisdn,
+		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
 		       dr_required, submitted_at, expiry_at
 		FROM messages
@@ -85,7 +85,7 @@ func (db *DB) ListRetryableMessages(ctx context.Context) ([]store.Message, error
 func (db *DB) ListExpiredMessages(ctx context.Context) ([]store.Message, error) {
 	const q = `
 		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, src_msisdn, dst_msisdn,
+		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
 		       dr_required, submitted_at, expiry_at
 		FROM messages
@@ -97,9 +97,9 @@ func (db *DB) ListExpiredMessages(ctx context.Context) ([]store.Message, error) 
 func (db *DB) GetMessage(ctx context.Context, id string) (*store.Message, error) {
 	const q = `
 		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, src_msisdn, dst_msisdn,
-		       payload, dcs, status, retry_count, next_retry_at,
-		       dr_required, submitted_at, expiry_at
+		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
+	       dr_required, submitted_at, expiry_at
 		FROM messages WHERE id=?`
 	msgs, err := sqliteScanMessages(db, ctx, q, id)
 	if err != nil {
@@ -137,7 +137,7 @@ func sqliteScanMessages(db *DB, ctx context.Context, q string, args ...any) ([]s
 
 		err := rows.Scan(
 			&m.ID, &tpmr, &m.SMPPMsgID, &m.OriginIface, &m.OriginPeer,
-			&m.EgressIface, &m.EgressPeer, &m.SrcMSISDN, &m.DstMSISDN,
+			&m.EgressIface, &m.EgressPeer, &m.RouteCursor, &m.SrcMSISDN, &m.DstMSISDN,
 			&m.Payload, &m.UDH, &encoding, &dcs, &m.Status,
 			&m.RetryCount, &nextRetryStr,
 			&drInt, &submittedStr, &expiryStr,
@@ -194,7 +194,7 @@ func (db *DB) ListMessages(ctx context.Context, limit int) ([]store.Message, err
 	}
 	const q = `
 		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, src_msisdn, dst_msisdn,
+		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
 		       dr_required, submitted_at, expiry_at
 	FROM messages ORDER BY submitted_at DESC LIMIT ?`
@@ -238,8 +238,8 @@ func (db *DB) ListFilteredMessages(ctx context.Context, filter store.MessageFilt
 
 	q := `
 		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, src_msisdn, dst_msisdn,
-		       payload, dcs, status, retry_count, next_retry_at,
+		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
 		       dr_required, submitted_at, expiry_at
 		FROM messages`
 	if len(conds) > 0 {

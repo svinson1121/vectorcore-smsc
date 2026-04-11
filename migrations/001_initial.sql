@@ -127,6 +127,7 @@ CREATE TABLE messages (
     origin_peer      TEXT,
     egress_iface     TEXT,
     egress_peer      TEXT,
+    route_cursor     INT NOT NULL DEFAULT 0,
     src_msisdn       TEXT,
     dst_msisdn       TEXT,
     payload          BYTEA,

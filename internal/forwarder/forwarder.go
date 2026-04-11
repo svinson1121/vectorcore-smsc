@@ -16,10 +16,10 @@ import (
 	"github.com/svinson1121/vectorcore-smsc/internal/metrics"
 	"github.com/svinson1121/vectorcore-smsc/internal/registry"
 	"github.com/svinson1121/vectorcore-smsc/internal/routing"
+	"github.com/svinson1121/vectorcore-smsc/internal/sgdmap"
 	"github.com/svinson1121/vectorcore-smsc/internal/smpp"
 	smppClient "github.com/svinson1121/vectorcore-smsc/internal/smpp/client"
 	"github.com/svinson1121/vectorcore-smsc/internal/store"
-	"github.com/svinson1121/vectorcore-smsc/internal/sgdmap"
 )
 
 // ISCSender sends MT SMS to IMS UEs via the SIP ISC interface.
@@ -43,6 +43,7 @@ type DeliveryReporter interface {
 }
 
 type selectedRoute struct {
+	routeIndex  int
 	egressIface string
 	egressPeer  string
 	sgdIMSI     string
@@ -115,122 +116,141 @@ func (f *Forwarder) Dispatch(ctx context.Context, msg *codec.Message) {
 	}
 
 	now := time.Now()
-	route, err := f.selectRoute(ctx, msg)
-	if err != nil {
-		slog.Warn("forwarder: no usable route",
-			"dst", msg.Destination.MSISDN,
-			"src_iface", msg.IngressInterface,
-			"err", err,
-		)
-		f.persistMessage(ctx, msg, "", "", store.MessageStatusFailed, now)
-		return
-	}
-	msg.EgressInterface = codec.InterfaceType(route.egressIface)
-
-	// ── Step 2: Write to DB before sending ───────────────────────────────────
-	// Save as QUEUED first, then immediately mark DISPATCHED. This ordering
-	// means a crash between save and send leaves the row in QUEUED; startup
-	// recovery will move any stuck DISPATCHED rows back to QUEUED.
-	f.persistMessage(ctx, msg, route.egressIface, route.egressPeer, store.MessageStatusQueued, now)
+	f.persistMessage(ctx, msg, "", "", store.MessageStatusQueued, now)
 	if err := f.st.UpdateMessageStatus(ctx, msg.ID, store.MessageStatusDispatched); err != nil {
 		slog.Error("forwarder: mark dispatched failed", "id", msg.ID, "err", err)
 		// Continue — we'll still attempt delivery; worst case the retry
 		// scheduler also attempts it (double-deliver is safer than losing it).
 	}
 
-	// ── Step 3: Attempt delivery ─────────────────────────────────────────────
-	var delivErr error
-	if f.m != nil {
-		// Count every outbound dispatch attempt (including attempts that fail and are retried).
-		f.m.MessagesOut.WithLabelValues(route.egressIface).Inc()
-	}
-	switch route.egressIface {
-	case string(codec.InterfaceSIP3GPP):
-		delivErr = f.deliverISC(ctx, msg, route.imsReg)
-	case string(codec.InterfaceSIPSimple):
-		delivErr = f.deliverSimple(ctx, msg, route.egressPeer)
-	case string(codec.InterfaceSMPP):
-		delivErr = f.deliverSMPP(ctx, msg, route.egressPeer)
-	case string(codec.InterfaceSGd):
-		delivErr = f.deliverSGd(ctx, msg, route.egressPeer)
-	default:
-		slog.Error("forwarder: unknown egress interface", "iface", route.egressIface)
-		_ = f.st.UpdateMessageStatus(ctx, msg.ID, store.MessageStatusFailed)
-		return
-	}
-
-	if delivErr == nil {
-		_ = f.st.UpdateMessageStatus(ctx, msg.ID, store.MessageStatusDelivered)
-		if f.reporter != nil {
-			if stored, err := f.st.GetMessage(ctx, msg.ID); err == nil && stored != nil {
-				f.reporter.Report(ctx, *stored, "DELIVRD")
-			}
+	route, err := f.tryRoutes(ctx, msg, msg.ID)
+	if err != nil {
+		slog.Warn("forwarder: no usable route",
+			"dst", msg.Destination.MSISDN,
+			"src_iface", msg.IngressInterface,
+			"err", err,
+		)
+		next := now.Add(30 * time.Second)
+		if err := f.st.UpdateMessageRetry(ctx, msg.ID, 1, next, 0); err != nil {
+			slog.Error("forwarder: schedule retry failed", "id", msg.ID, "err", err)
 		}
 		return
 	}
 
-	// ── Step 4: Schedule retry ────────────────────────────────────────────────
-	slog.Warn("forwarder: initial delivery failed, queuing for retry",
-		"dst", msg.Destination.MSISDN, "egress", route.egressIface, "peer", route.egressPeer, "err", delivErr)
-	next := now.Add(30 * time.Second)
-	if err := f.st.UpdateMessageRetry(ctx, msg.ID, 1, next); err != nil {
-		slog.Error("forwarder: schedule retry failed", "id", msg.ID, "err", err)
+	if err := f.persistDeliveredRoute(ctx, msg.ID, msg.EgressInterface, route.egressPeer); err != nil {
+		slog.Error("forwarder: persist delivered route failed", "id", msg.ID, "err", err)
+	}
+	_ = f.st.UpdateMessageStatus(ctx, msg.ID, store.MessageStatusDelivered)
+	if f.reporter != nil {
+		if stored, err := f.st.GetMessage(ctx, msg.ID); err == nil && stored != nil {
+			f.reporter.Report(ctx, *stored, "DELIVRD")
+		}
 	}
 }
 
-func (f *Forwarder) selectRoute(ctx context.Context, msg *codec.Message) (*selectedRoute, error) {
-	reg, err := f.reg.ShLookup(ctx, msg.Destination.MSISDN)
-	if err != nil {
-		slog.Warn("forwarder: Sh lookup error, continuing to routing rules",
-			"dst", msg.Destination.MSISDN, "err", err)
-	}
-	if reg != nil && reg.Registered {
-		slog.Debug("forwarder: selected IMS route from local/Sh registration",
-			"dst", msg.Destination.MSISDN,
-			"egress", codec.InterfaceSIP3GPP,
-			"peer", reg.SCSCF,
-		)
-		return &selectedRoute{
-			egressIface: string(codec.InterfaceSIP3GPP),
-			egressPeer:  reg.SCSCF,
-			imsReg:      reg,
-		}, nil
+func (f *Forwarder) tryRoutes(ctx context.Context, msg *codec.Message, messageID string) (*selectedRoute, error) {
+	totalCandidates := f.candidateCount(msg)
+	var lastErr error
+
+	for cursor := 0; cursor < totalCandidates; {
+		route, err := f.selectRoute(ctx, msg, cursor)
+		if err != nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, err
+		}
+		msg.EgressInterface = codec.InterfaceType(route.egressIface)
+		if err := f.deliverSelectedRoute(ctx, msg, route); err == nil {
+			return route, nil
+		} else {
+			lastErr = err
+			slog.Warn("forwarder: candidate delivery failed",
+				"dst", msg.Destination.MSISDN,
+				"route_index", route.routeIndex,
+				"egress", route.egressIface,
+				"peer", route.egressPeer,
+				"err", err,
+			)
+		}
+		cursor = route.nextRouteCursor()
 	}
 
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no usable route for dst=%s", msg.Destination.MSISDN)
+}
+
+func (f *Forwarder) persistDeliveredRoute(ctx context.Context, messageID string, egress codec.InterfaceType, peer string) error {
+	if messageID == "" || egress == "" {
+		return nil
+	}
+	return f.st.UpdateMessageRouting(ctx, messageID, string(egress), peer)
+}
+
+func (f *Forwarder) deliverSelectedRoute(ctx context.Context, msg *codec.Message, route *selectedRoute) error {
+	if f.m != nil {
+		f.m.MessagesOut.WithLabelValues(route.egressIface).Inc()
+	}
+	msg.EgressInterface = codec.InterfaceType(route.egressIface)
+	switch route.egressIface {
+	case string(codec.InterfaceSIP3GPP):
+		return f.deliverISC(ctx, msg, route.imsReg)
+	case string(codec.InterfaceSIPSimple):
+		return f.deliverSimple(ctx, msg, route.egressPeer)
+	case string(codec.InterfaceSMPP):
+		return f.deliverSMPP(ctx, msg, route.egressPeer)
+	case string(codec.InterfaceSGd):
+		msg.Destination.IMSI = route.sgdIMSI
+		return f.deliverSGd(ctx, msg, route.egressPeer)
+	default:
+		return fmt.Errorf("unknown egress interface %q", route.egressIface)
+	}
+}
+
+func (f *Forwarder) candidateCount(msg *codec.Message) int {
 	decisions, err := f.engine.RouteAll(msg)
 	if err != nil {
+		return 2
+	}
+	return len(decisions) + 2
+}
+
+func (f *Forwarder) selectRoute(ctx context.Context, msg *codec.Message, startCursor int) (*selectedRoute, error) {
+	decisions, err := f.engine.RouteAll(msg)
+	if err != nil {
+		decisions = nil
+	}
+	totalCandidates := len(decisions) + 2
+	if totalCandidates == 0 {
 		return nil, err
 	}
 	slog.Debug("forwarder: routing candidates matched",
 		"dst", msg.Destination.MSISDN,
 		"count", len(decisions),
+		"cursor", startCursor,
 	)
 
 	var skipped []string
-	for _, decision := range decisions {
-		slog.Debug("forwarder: evaluating routing candidate",
-			"dst", msg.Destination.MSISDN,
-			"rule", decision.RuleName,
-			"priority", decision.Priority,
-			"egress", decision.EgressIface,
-			"peer", decision.EgressPeer,
-		)
-		route, reason := f.resolveCandidate(ctx, msg, decision, reg)
+	base := modulo(startCursor, totalCandidates)
+	for offset := 0; offset < totalCandidates; offset++ {
+		routeIndex := (base + offset) % totalCandidates
+		route, reason := f.resolveCandidateAt(ctx, msg, decisions, routeIndex)
 		if reason != "" {
 			slog.Debug("forwarder: routing candidate skipped",
 				"dst", msg.Destination.MSISDN,
-				"rule", decision.RuleName,
-				"priority", decision.Priority,
-				"egress", decision.EgressIface,
+				"route_index", routeIndex,
 				"reason", reason,
 			)
-			skipped = append(skipped, fmt.Sprintf("%s[%d]: %s", decision.RuleName, decision.Priority, reason))
+			skipped = append(skipped, fmt.Sprintf("route[%d]: %s", routeIndex, reason))
 			continue
 		}
 		slog.Debug("forwarder: routing candidate selected",
 			"dst", msg.Destination.MSISDN,
-			"rule", decision.RuleName,
-			"priority", decision.Priority,
+			"route_index", route.routeIndex,
+			"rule", route.ruleName,
+			"priority", route.priority,
 			"egress", route.egressIface,
 			"peer", route.egressPeer,
 		)
@@ -244,22 +264,78 @@ func (f *Forwarder) selectRoute(ctx context.Context, msg *codec.Message) (*selec
 	return nil, fmt.Errorf("no usable matching route: %s", strings.Join(skipped, "; "))
 }
 
-func (f *Forwarder) resolveCandidate(ctx context.Context, msg *codec.Message, decision routing.Decision, reg *registry.Registration) (*selectedRoute, string) {
+func (f *Forwarder) resolveCandidateAt(ctx context.Context, msg *codec.Message, decisions []routing.Decision, routeIndex int) (*selectedRoute, string) {
+	switch {
+	case routeIndex == 0:
+		reg, ok := f.reg.Lookup(msg.Destination.MSISDN)
+		if !ok || reg == nil || !reg.Registered || reg.SCSCF == "" {
+			return nil, "subscriber not locally IMS registered"
+		}
+		return &selectedRoute{
+			routeIndex:  routeIndex,
+			egressIface: string(codec.InterfaceSIP3GPP),
+			egressPeer:  reg.SCSCF,
+			imsReg:      reg,
+			ruleName:    "ims-local",
+			priority:    -2,
+		}, ""
+	case routeIndex == 1:
+		reg, err := f.reg.ShRefresh(ctx, msg.Destination.MSISDN)
+		if err != nil {
+			slog.Warn("forwarder: Sh lookup error, continuing to routing rules",
+				"dst", msg.Destination.MSISDN, "err", err)
+			return nil, fmt.Sprintf("Sh lookup failed: %v", err)
+		}
+		if reg == nil || !reg.Registered || reg.SCSCF == "" {
+			return nil, "subscriber not IMS registered via Sh"
+		}
+		return &selectedRoute{
+			routeIndex:  routeIndex,
+			egressIface: string(codec.InterfaceSIP3GPP),
+			egressPeer:  reg.SCSCF,
+			imsReg:      reg,
+			ruleName:    "ims-sh",
+			priority:    -1,
+		}, ""
+	default:
+		decisionIdx := routeIndex - 2
+		if decisionIdx < 0 || decisionIdx >= len(decisions) {
+			return nil, "no routing rule at index"
+		}
+		decision := decisions[decisionIdx]
+		slog.Debug("forwarder: evaluating routing candidate",
+			"dst", msg.Destination.MSISDN,
+			"route_index", routeIndex,
+			"rule", decision.RuleName,
+			"priority", decision.Priority,
+			"egress", decision.EgressIface,
+			"peer", decision.EgressPeer,
+		)
+		return f.resolveCandidate(ctx, msg, decision, routeIndex)
+	}
+}
+
+func (f *Forwarder) resolveCandidate(ctx context.Context, msg *codec.Message, decision routing.Decision, routeIndex int) (*selectedRoute, string) {
 	route := &selectedRoute{
+		routeIndex:  routeIndex,
 		egressIface: decision.EgressIface,
 		egressPeer:  decision.EgressPeer,
 		sfPolicyID:  decision.SFPolicyID,
 		ruleName:    decision.RuleName,
 		priority:    decision.Priority,
-		imsReg:      reg,
 	}
 
 	switch decision.EgressIface {
 	case string(codec.InterfaceSIP3GPP):
+		reg, ok := f.reg.Lookup(msg.Destination.MSISDN)
+		if !ok || reg == nil {
+			return nil, "subscriber not locally IMS registered"
+		}
 		if reg == nil || !reg.Registered || reg.SCSCF == "" {
 			return nil, "subscriber not IMS registered"
 		}
 		route.egressPeer = reg.SCSCF
+		route.imsReg = reg
 		return route, ""
 	case string(codec.InterfaceSIPSimple):
 		if f.simpleSender == nil {
@@ -313,6 +389,21 @@ func (f *Forwarder) resolveCandidate(ctx context.Context, msg *codec.Message, de
 	}
 }
 
+func (r *selectedRoute) nextRouteCursor() int {
+	return r.routeIndex + 1
+}
+
+func modulo(v, size int) int {
+	if size <= 0 {
+		return 0
+	}
+	v %= size
+	if v < 0 {
+		v += size
+	}
+	return v
+}
+
 func (f *Forwarder) resolveSGdTarget(ctx context.Context, msisdn string) (string, string, string) {
 	if f.sgdSender == nil {
 		return "", "", "SGd sender not configured"
@@ -361,6 +452,7 @@ func (f *Forwarder) persistMessage(ctx context.Context, msg *codec.Message,
 		SMPPMsgID:   msg.SMPPMsgID,
 		EgressIface: egressIface,
 		EgressPeer:  egressPeer,
+		RouteCursor: 0,
 		SrcMSISDN:   msg.Source.MSISDN,
 		DstMSISDN:   msg.Destination.MSISDN,
 		Encoding:    int(msg.Encoding),
@@ -371,7 +463,17 @@ func (f *Forwarder) persistMessage(ctx context.Context, msg *codec.Message,
 		SubmittedAt: now,
 		ExpiryAt:    expiry,
 	}
-	if len(msg.Binary) > 0 {
+	switch msg.Encoding {
+	case codec.EncodingBinary:
+		if len(msg.Binary) > 0 {
+			sm.Payload = append([]byte(nil), msg.Binary...)
+		}
+	default:
+		if msg.Text != "" {
+			sm.Payload = []byte(msg.Text)
+		}
+	}
+	if len(msg.Binary) > 0 && len(sm.Payload) == 0 {
 		sm.Payload = append([]byte(nil), msg.Binary...)
 	}
 	if msg.UDH != nil && len(msg.UDH.Raw) > 0 {

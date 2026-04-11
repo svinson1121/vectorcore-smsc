@@ -67,7 +67,7 @@ func (s *alertTestStore) UpdateMessageRouting(context.Context, string, string, s
 func (s *alertTestStore) UpdateMessageStatus(context.Context, string, string) error {
 	panic("unexpected call")
 }
-func (s *alertTestStore) UpdateMessageRetry(_ context.Context, id string, _ int, nextRetryAt time.Time) error {
+func (s *alertTestStore) UpdateMessageRetry(_ context.Context, id string, _ int, nextRetryAt time.Time, _ int) error {
 	if s.updated == nil {
 		s.updated = map[string]time.Time{}
 	}
@@ -235,7 +235,7 @@ func makeALSCRequeueHandler(st store.Store) func(s6c.AlertServiceCentreRequest) 
 			if msg.EgressIface != string(codec.InterfaceSGd) {
 				continue
 			}
-			if err := st.UpdateMessageRetry(context.Background(), msg.ID, msg.RetryCount, now); err != nil {
+			if err := st.UpdateMessageRetry(context.Background(), msg.ID, msg.RetryCount, now, msg.RouteCursor); err != nil {
 				return err
 			}
 		}

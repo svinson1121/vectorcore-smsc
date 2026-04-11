@@ -149,6 +149,7 @@ type Message struct {
 	OriginPeer  string     `json:"origin_peer"`
 	EgressIface string     `json:"egress_iface"`
 	EgressPeer  string     `json:"egress_peer"`
+	RouteCursor int        `json:"route_cursor"`
 	SrcMSISDN   string     `json:"src_msisdn"`
 	DstMSISDN   string     `json:"dst_msisdn"`
 	Payload     []byte     `json:"payload,omitempty"`
@@ -232,7 +233,7 @@ type Store interface {
 	SaveMessage(ctx context.Context, msg Message) error
 	UpdateMessageRouting(ctx context.Context, id, egressIface, egressPeer string) error
 	UpdateMessageStatus(ctx context.Context, id, status string) error
-	UpdateMessageRetry(ctx context.Context, id string, retryCount int, nextRetryAt time.Time) error
+	UpdateMessageRetry(ctx context.Context, id string, retryCount int, nextRetryAt time.Time, routeCursor int) error
 	ListRetryableMessages(ctx context.Context) ([]Message, error)
 	ListExpiredMessages(ctx context.Context) ([]Message, error)
 	GetMessage(ctx context.Context, id string) (*Message, error)

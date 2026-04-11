@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS messages (
     origin_peer      TEXT,
     egress_iface     TEXT,
     egress_peer      TEXT,
+    route_cursor     INTEGER NOT NULL DEFAULT 0,
     src_msisdn       TEXT,
     dst_msisdn       TEXT,
     payload          BLOB,
