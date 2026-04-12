@@ -1,6 +1,7 @@
 package sgd
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/svinson1121/vectorcore-smsc/internal/codec"
@@ -17,6 +18,7 @@ func TestBuildAlertSCRequestIncludesRequiredAVPs(t *testing.T) {
 		"epc.example.net",
 		"3342012832",
 		"+15550000000",
+		"tbcd",
 	)
 
 	if !msg.IsRequest() {
@@ -54,13 +56,14 @@ func TestBuildOFRRequestIncludesRequiredAVPs(t *testing.T) {
 	canonical.Source.MSISDN = "15551234567"
 	canonical.Destination.MSISDN = "3342012832"
 	canonical.Destination.IMSI = "311435000070570"
+	canonical.Destination.MMENumber = "15550000001"
 	canonical.TPMR = 7
 	canonical.DCS = 0
 	tpData, err := tpdu.EncodeDeliver(canonical)
 	if err != nil {
 		t.Fatalf("EncodeDeliver() error = %v", err)
 	}
-	avps, err := sgdcodec.EncodeOFR(canonical, "+15550000000")
+	avps, err := sgdcodec.EncodeOFR(canonical, "+15550000000", "tbcd")
 	if err != nil {
 		t.Fatalf("EncodeOFR() error = %v", err)
 	}
@@ -99,12 +102,77 @@ func TestBuildOFRRequestIncludesRequiredAVPs(t *testing.T) {
 	if msg.FindAVP(dcodec.CodeSCAddress, dcodec.Vendor3GPP) == nil {
 		t.Fatal("missing SC-Address AVP")
 	}
+	if avp := msg.FindAVP(dcodec.CodeSCAddress, dcodec.Vendor3GPP); avp != nil {
+		want := []byte{0x51, 0x55, 0x00, 0x00, 0x00, 0xF0}
+		if !bytes.Equal(avp.Data, want) {
+			t.Fatalf("SC-Address bytes = %x, want %x", avp.Data, want)
+		}
+	}
 	if avp := msg.FindAVP(dcodec.CodeUserName, 0); avp == nil {
 		t.Fatal("missing User-Name AVP")
 	} else if got, want := string(avp.Data), canonical.Destination.IMSI; got != want {
 		t.Fatalf("User-Name = %q, want %q", got, want)
 	}
+	if avp := msg.FindAVP(dcodec.CodeMMENumberForMTSMSServing, dcodec.Vendor3GPP); avp == nil {
+		t.Fatal("missing MME-Number-for-MT-SMS AVP on MT SGd request")
+	} else {
+		want := []byte{0x51, 0x55, 0x00, 0x00, 0x00, 0xF1}
+		if !bytes.Equal(avp.Data, want) {
+			t.Fatalf("MME-Number-for-MT-SMS bytes = %x, want %x", avp.Data, want)
+		}
+	}
+	if msg.FindAVP(dcodec.CodeMMENumberForMTSMS, dcodec.Vendor3GPP) != nil {
+		t.Fatal("unexpected legacy MME-Number-for-MT-SMS AVP 1607 on MT SGd request")
+	}
 	if msg.FindAVP(dcodec.CodeMSISDN, dcodec.Vendor3GPP) != nil {
 		t.Fatal("unexpected MSISDN AVP on MT SGd request")
+	}
+}
+
+func TestBuildOFRRequestUsesMMENumberAsSCAddressWhenProvided(t *testing.T) {
+	canonical := &codec.Message{}
+	canonical.Source.MSISDN = "15551234567"
+	canonical.Destination.MSISDN = "3324108223"
+	canonical.Destination.IMSI = "311435000070570"
+	canonical.Destination.MMENumber = "15550000001"
+	canonical.TPMR = 7
+	canonical.DCS = 0
+
+	avps, err := sgdcodec.EncodeOFR(canonical, canonical.Destination.MMENumber, "tbcd")
+	if err != nil {
+		t.Fatalf("EncodeOFR() error = %v", err)
+	}
+	msg := buildOFRRequest("smsc.example.net", "example.net", "mme01.epc.example.net", "epc.example.net", avps)
+
+	scAddr := msg.FindAVP(dcodec.CodeSCAddress, dcodec.Vendor3GPP)
+	if scAddr == nil {
+		t.Fatal("missing SC-Address AVP")
+	}
+	want := []byte{0x51, 0x55, 0x00, 0x00, 0x00, 0xF1}
+	if !bytes.Equal(scAddr.Data, want) {
+		t.Fatalf("SC-Address bytes = %x, want %x", scAddr.Data, want)
+	}
+}
+
+func TestBuildOFRRequestEncodesSCAddressAsASCIIDigitsWhenConfigured(t *testing.T) {
+	canonical := &codec.Message{}
+	canonical.Source.MSISDN = "15551234567"
+	canonical.Destination.MSISDN = "3324108223"
+	canonical.Destination.IMSI = "311435000070570"
+	canonical.Destination.MMENumber = "15550000001"
+
+	avps, err := sgdcodec.EncodeOFR(canonical, "+15550000000", "ascii_digits")
+	if err != nil {
+		t.Fatalf("EncodeOFR() error = %v", err)
+	}
+	msg := buildOFRRequest("smsc.example.net", "example.net", "mme01.epc.example.net", "epc.example.net", avps)
+
+	scAddr := msg.FindAVP(dcodec.CodeSCAddress, dcodec.Vendor3GPP)
+	if scAddr == nil {
+		t.Fatal("missing SC-Address AVP")
+	}
+	want := []byte("15550000000")
+	if !bytes.Equal(scAddr.Data, want) {
+		t.Fatalf("SC-Address bytes = %x, want %x", scAddr.Data, want)
 	}
 }

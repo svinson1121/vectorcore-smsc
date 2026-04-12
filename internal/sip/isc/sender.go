@@ -97,6 +97,14 @@ func (s *Sender) buildRequest(msg *codec.Message, reg *registry.Registration, bo
 	fromParams := sip.NewParams()
 	fromParams.Add("tag", newTag())
 	req.AppendHeader(&sip.FromHeader{Address: fromURI, Params: fromParams})
+	callIDValue := msg.CorrelationID
+	if callIDValue == "" {
+		callIDValue = msg.ID
+	}
+	if callIDValue != "" {
+		callID := sip.CallIDHeader(callIDValue)
+		req.AppendHeader(&callID)
+	}
 
 	req.AppendHeader(sip.NewHeader("Content-Type", sip3gpp.ContentType))
 	if v := strings.TrimSpace(s.cfg.MTRequestDisposition); v != "" {

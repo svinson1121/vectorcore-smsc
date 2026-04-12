@@ -58,6 +58,7 @@ func Open(ctx context.Context, dsn string) (*DB, error) {
 	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS udh BYTEA`)
 	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS encoding SMALLINT`)
 	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS route_cursor INT NOT NULL DEFAULT 0`)
+	pool.Exec(ctx, `ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS mme_number TEXT`)
 	// Crash recovery: messages stuck in DISPATCHED state (server died mid-send)
 	// are reset to QUEUED so the retry scheduler re-attempts them.
 	pool.Exec(ctx, `UPDATE messages SET status='QUEUED', next_retry_at=now() WHERE status='DISPATCHED'`)

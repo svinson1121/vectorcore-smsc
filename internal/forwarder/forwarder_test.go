@@ -283,10 +283,17 @@ func (f *fakeS6cClient) LookupRouting(msisdn string) (*s6c.RoutingInfo, error) {
 	return f.info, f.err
 }
 
-type fakeSGdSender struct{}
+type fakeSGdSender struct {
+	lastSCAddr string
+	lastMME    string
+}
 
-func (f *fakeSGdSender) SendOFR(context.Context, *codec.Message, string, string) error { return nil }
-func (f *fakeSGdSender) HasPeerForMME(string) bool                                     { return true }
+func (f *fakeSGdSender) SendOFR(_ context.Context, _ *codec.Message, mmeHost, scAddr string) error {
+	f.lastMME = mmeHost
+	f.lastSCAddr = scAddr
+	return nil
+}
+func (f *fakeSGdSender) HasPeerForMME(string) bool { return true }
 
 func newTestRegistry(t *testing.T, st store.Store) *registry.Registry {
 	t.Helper()
@@ -483,6 +490,211 @@ func TestSelectRouteFallsThroughFromSGdToNextRule(t *testing.T) {
 	}
 	if got := s6cClient.calls; got != 1 {
 		t.Fatalf("S6c calls = %d, want 1", got)
+	}
+}
+
+func TestSelectRouteRefreshesS6cBeforeSGdWhenSubscriberCacheClaimsAttached(t *testing.T) {
+	st := &forwarderTestStore{
+		subscriber: &store.Subscriber{
+			MSISDN:        "3342012832",
+			IMSI:          "311435000070570",
+			LTEAttached:   true,
+			MMENumber:     "15550000001",
+			MMEHost:       "stale-mme.epc.mnc435.mcc311.3gppnetwork.org",
+			IMSRegistered: false,
+			UpdatedAt:     time.Now().Add(-301 * time.Second),
+		},
+		sipPeers: map[string]store.SIPPeer{
+			"simple1": {Name: "simple1"},
+		},
+	}
+	reg := newTestRegistry(t, st)
+	s6cClient := &fakeS6cClient{info: &s6c.RoutingInfo{Attached: false}}
+	reg.SetS6cClient(s6cClient)
+
+	engine := routing.NewEngine()
+	engine.Reload([]store.RoutingRule{
+		{Name: "sgd-first", Priority: 10, MatchSrcIface: "smpp", MatchDstPrefix: "334", EgressIface: "sgd"},
+		{Name: "simple-second", Priority: 20, MatchSrcIface: "smpp", MatchDstPrefix: "334", EgressIface: "sipsimple", EgressPeer: "simple1"},
+	})
+
+	f := New(Config{
+		Registry:     reg,
+		Engine:       engine,
+		Store:        st,
+		SimpleSender: &fakeSimpleSender{},
+		SGdSender:    &fakeSGdSender{},
+	})
+
+	route, err := f.selectRoute(context.Background(), &codec.Message{
+		IngressInterface: codec.InterfaceSMPP,
+		Destination:      codec.Address{MSISDN: "3342012832"},
+	}, 0)
+	if err != nil {
+		t.Fatalf("selectRoute() error = %v", err)
+	}
+	if got, want := route.egressIface, "sipsimple"; got != want {
+		t.Fatalf("egressIface = %q, want %q", got, want)
+	}
+	if got := s6cClient.calls; got != 1 {
+		t.Fatalf("S6c calls = %d, want 1", got)
+	}
+	if st.subscriber == nil {
+		t.Fatal("subscriber cache was not updated")
+	}
+	if st.subscriber.LTEAttached {
+		t.Fatalf("LTEAttached = %v, want false after S6c refresh", st.subscriber.LTEAttached)
+	}
+}
+
+func TestSelectRouteUsesFreshS6cCacheForSGdCandidate(t *testing.T) {
+	st := &forwarderTestStore{
+		subscriber: &store.Subscriber{
+			MSISDN:        "3342012832",
+			IMSI:          "311435000070570",
+			LTEAttached:   true,
+			MMENumber:     "15550000001",
+			MMEHost:       "fresh-mme.epc.mnc435.mcc311.3gppnetwork.org",
+			IMSRegistered: false,
+			UpdatedAt:     time.Now().Add(-299 * time.Second),
+		},
+	}
+	reg := newTestRegistry(t, st)
+	s6cClient := &fakeS6cClient{info: &s6c.RoutingInfo{Attached: false}}
+	reg.SetS6cClient(s6cClient)
+
+	engine := routing.NewEngine()
+	engine.Reload([]store.RoutingRule{
+		{Name: "sgd-first", Priority: 10, MatchSrcIface: "smpp", MatchDstPrefix: "334", EgressIface: "sgd"},
+	})
+
+	f := New(Config{
+		Registry:  reg,
+		Engine:    engine,
+		Store:     st,
+		SGdSender: &fakeSGdSender{},
+	})
+
+	route, err := f.selectRoute(context.Background(), &codec.Message{
+		IngressInterface: codec.InterfaceSMPP,
+		Destination:      codec.Address{MSISDN: "3342012832"},
+	}, 0)
+	if err != nil {
+		t.Fatalf("selectRoute() error = %v", err)
+	}
+	if got, want := route.egressIface, "sgd"; got != want {
+		t.Fatalf("egressIface = %q, want %q", got, want)
+	}
+	if got, want := route.egressPeer, "fresh-mme.epc.mnc435.mcc311.3gppnetwork.org"; got != want {
+		t.Fatalf("egressPeer = %q, want %q", got, want)
+	}
+	if got, want := route.sgdMMENum, "15550000001"; got != want {
+		t.Fatalf("sgdMMENum = %q, want %q", got, want)
+	}
+	if got := s6cClient.calls; got != 0 {
+		t.Fatalf("S6c calls = %d, want 0", got)
+	}
+}
+
+func TestSelectRouteUsesFreshS6cCacheHexMMENumberForSGdCandidate(t *testing.T) {
+	st := &forwarderTestStore{
+		subscriber: &store.Subscriber{
+			MSISDN:        "3342012832",
+			IMSI:          "311435000070570",
+			LTEAttached:   true,
+			MMENumber:     "5155000000f1",
+			MMEHost:       "fresh-mme.epc.mnc435.mcc311.3gppnetwork.org",
+			IMSRegistered: false,
+			UpdatedAt:     time.Now().Add(-299 * time.Second),
+		},
+	}
+	reg := newTestRegistry(t, st)
+	s6cClient := &fakeS6cClient{info: &s6c.RoutingInfo{Attached: false}}
+	reg.SetS6cClient(s6cClient)
+
+	engine := routing.NewEngine()
+	engine.Reload([]store.RoutingRule{
+		{Name: "sgd-first", Priority: 10, MatchSrcIface: "smpp", MatchDstPrefix: "334", EgressIface: "sgd"},
+	})
+
+	sgdSender := &fakeSGdSender{}
+	f := New(Config{
+		Registry:  reg,
+		Engine:    engine,
+		Store:     st,
+		SGdSender: sgdSender,
+		SCAddr:    "15550000000",
+	})
+
+	msg := &codec.Message{
+		IngressInterface: codec.InterfaceSMPP,
+		Destination:      codec.Address{MSISDN: "3342012832"},
+	}
+	route, err := f.selectRoute(context.Background(), msg, 0)
+	if err != nil {
+		t.Fatalf("selectRoute() error = %v", err)
+	}
+	if got, want := route.sgdMMENum, "15550000001"; got != want {
+		t.Fatalf("sgdMMENum = %q, want %q", got, want)
+	}
+	if got := s6cClient.calls; got != 0 {
+		t.Fatalf("S6c calls = %d, want 0", got)
+	}
+
+	if err := f.deliverSelectedRoute(context.Background(), msg, route); err != nil {
+		t.Fatalf("deliverSelectedRoute() error = %v", err)
+	}
+	if got, want := sgdSender.lastSCAddr, "15550000000"; got != want {
+		t.Fatalf("SCAddress = %q, want %q", got, want)
+	}
+}
+
+func TestDeliverSGdPrefersDestinationMMENumberAsSCAddress(t *testing.T) {
+	sgdSender := &fakeSGdSender{}
+	f := &Forwarder{
+		scAddr:    "15550000000",
+		sgdSender: sgdSender,
+	}
+
+	msg := &codec.Message{
+		Destination: codec.Address{
+			MSISDN:    "3342012832",
+			IMSI:      "311435000070570",
+			MMENumber: "15550000001",
+		},
+	}
+
+	if err := f.deliverSGd(context.Background(), msg, "mme01.example.net"); err != nil {
+		t.Fatalf("deliverSGd() error = %v", err)
+	}
+	if got, want := sgdSender.lastSCAddr, "15550000000"; got != want {
+		t.Fatalf("SCAddress = %q, want %q", got, want)
+	}
+	if got, want := sgdSender.lastMME, "mme01.example.net"; got != want {
+		t.Fatalf("MME = %q, want %q", got, want)
+	}
+}
+
+func TestDeliverSGdUsesConfiguredSCAddress(t *testing.T) {
+	sgdSender := &fakeSGdSender{}
+	f := &Forwarder{
+		scAddr:    "15550000000",
+		sgdSender: sgdSender,
+	}
+
+	msg := &codec.Message{
+		Destination: codec.Address{
+			MSISDN:    "3342012832",
+			IMSI:      "311435000070570",
+			MMENumber: "5155000000f1",
+		},
+	}
+
+	if err := f.deliverSGd(context.Background(), msg, "mme01.example.net"); err != nil {
+		t.Fatalf("deliverSGd() error = %v", err)
+	}
+	if got, want := sgdSender.lastSCAddr, "15550000000"; got != want {
+		t.Fatalf("SCAddress = %q, want %q", got, want)
 	}
 }
 

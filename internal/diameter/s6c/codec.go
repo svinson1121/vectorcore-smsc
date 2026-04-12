@@ -1,6 +1,7 @@
 package s6c
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -42,6 +43,8 @@ func parseSRIAnswer(msg *dcodec.Message) (*RoutingInfo, error) {
 			switch {
 			case child.Code == dcodec.CodeMMEName && child.VendorID == dcodec.Vendor3GPP:
 				info.MMEName = string(child.Data)
+			case (child.Code == dcodec.CodeMMENumberForMTSMSS6c || child.Code == dcodec.CodeMMENumberForMTSMSServing) && child.VendorID == dcodec.Vendor3GPP:
+				info.MMENumber = NormalizeE164Address(string(child.Data))
 			case child.Code == dcodec.CodeMMERealm && child.VendorID == dcodec.Vendor3GPP:
 				info.MMERealm = string(child.Data)
 			}
@@ -141,6 +144,72 @@ func decodeTBCD(data []byte) string {
 		out = appendDigit(out, hi)
 	}
 	return string(out)
+}
+
+// decodeE164Digits normalizes Diameter octet strings that represent an E.164
+// address. Some AVPs carry raw TBCD digits, while others include a leading
+// length and TON/NPI byte. In both cases we persist just the digit string.
+func decodeE164Digits(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	if len(data) >= 2 && data[0] < byte(len(data)) && data[1]&0x80 != 0 {
+		return decodeTBCD(data[2:])
+	}
+	return decodeTBCD(data)
+}
+
+// NormalizeE164Address converts an E.164 address into the persisted digit-only
+// form used internally. It accepts already-normalized digits, optional leading
+// '+', raw TBCD bytes coerced to string, and hex text such as "5155000000f1".
+func NormalizeE164Address(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if isDigitString(raw) {
+		return raw
+	}
+	if strings.HasPrefix(raw, "+") && isDigitString(raw[1:]) {
+		return raw[1:]
+	}
+	if isHexAddress(raw) {
+		if decoded, err := hex.DecodeString(raw); err == nil {
+			return decodeE164Digits(decoded)
+		}
+	}
+	return decodeE164Digits([]byte(raw))
+}
+
+func isDigitString(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isHexAddress(s string) bool {
+	if len(s) == 0 || len(s)%2 != 0 {
+		return false
+	}
+	hasHexAlpha := false
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] >= '0' && s[i] <= '9':
+		case s[i] >= 'a' && s[i] <= 'f':
+			hasHexAlpha = true
+		case s[i] >= 'A' && s[i] <= 'F':
+			hasHexAlpha = true
+		default:
+			return false
+		}
+	}
+	return hasHexAlpha
 }
 
 func digitNibble(d byte) byte {

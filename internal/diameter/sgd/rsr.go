@@ -6,8 +6,8 @@ import (
 	"log/slog"
 
 	sgdcodec "github.com/svinson1121/vectorcore-smsc/internal/codec/sgd"
-	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
 	"github.com/svinson1121/vectorcore-smsc/internal/diameter"
+	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
 )
 
 // SendRSR sends a Report-SM-Delivery-Status-Request to the HSS via the S6c
@@ -15,8 +15,8 @@ import (
 //
 // In the current phase this is sent to the SGd peer (MME) that forwarded the
 // original request.  Full S6c support (separate HSS connection) is Phase 5.
-func SendRSR(ctx context.Context, p *diameter.Peer, msisdn, scAddr string, outcome uint32) error {
-	avps, err := sgdcodec.EncodeRSR(msisdn, scAddr, outcome)
+func SendRSR(ctx context.Context, p *diameter.Peer, msisdn, scAddr, scAddrEncoding string, outcome uint32) error {
+	avps, err := sgdcodec.EncodeRSR(msisdn, scAddr, scAddrEncoding, outcome)
 	if err != nil {
 		return fmt.Errorf("sgd RSR encode: %w", err)
 	}

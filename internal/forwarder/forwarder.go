@@ -47,6 +47,7 @@ type selectedRoute struct {
 	egressIface string
 	egressPeer  string
 	sgdIMSI     string
+	sgdMMENum   string
 	imsReg      *registry.Registration
 	sfPolicyID  string
 	ruleName    string
@@ -203,6 +204,7 @@ func (f *Forwarder) deliverSelectedRoute(ctx context.Context, msg *codec.Message
 		return f.deliverSMPP(ctx, msg, route.egressPeer)
 	case string(codec.InterfaceSGd):
 		msg.Destination.IMSI = route.sgdIMSI
+		msg.Destination.MMENumber = route.sgdMMENum
 		return f.deliverSGd(ctx, msg, route.egressPeer)
 	default:
 		return fmt.Errorf("unknown egress interface %q", route.egressIface)
@@ -361,7 +363,7 @@ func (f *Forwarder) resolveCandidate(ctx context.Context, msg *codec.Message, de
 		}
 		return route, ""
 	case string(codec.InterfaceSGd):
-		mmeHost, imsi, reason := f.resolveSGdTarget(ctx, msg.Destination.MSISDN)
+		mmeHost, imsi, mmeNumber, reason := f.resolveSGdTarget(ctx, msg.Destination.MSISDN)
 		if reason != "" {
 			return nil, reason
 		}
@@ -381,8 +383,10 @@ func (f *Forwarder) resolveCandidate(ctx context.Context, msg *codec.Message, de
 			}
 		}
 		msg.Destination.IMSI = imsi
+		msg.Destination.MMENumber = mmeNumber
 		route.egressPeer = mmeHost
 		route.sgdIMSI = imsi
+		route.sgdMMENum = mmeNumber
 		return route, ""
 	default:
 		return nil, fmt.Sprintf("unsupported egress interface %q", decision.EgressIface)
@@ -404,25 +408,24 @@ func modulo(v, size int) int {
 	return v
 }
 
-func (f *Forwarder) resolveSGdTarget(ctx context.Context, msisdn string) (string, string, string) {
+func (f *Forwarder) resolveSGdTarget(ctx context.Context, msisdn string) (string, string, string, string) {
 	if f.sgdSender == nil {
-		return "", "", "SGd sender not configured"
-	}
-	sub, err := f.st.GetSubscriber(ctx, msisdn)
-	if err == nil && sub != nil && sub.LTEAttached && sub.MMEHost != "" && sub.IMSI != "" {
-		return f.applyMMEMapping(sub.MMEHost), sub.IMSI, ""
+		return "", "", "", "SGd sender not configured"
 	}
 	s6cSub, s6cErr := f.reg.S6cLookup(ctx, msisdn)
 	if s6cErr != nil {
-		return "", "", fmt.Sprintf("S6c lookup failed: %v", s6cErr)
+		return "", "", "", fmt.Sprintf("S6c lookup failed: %v", s6cErr)
 	}
 	if s6cSub == nil || !s6cSub.LTEAttached || s6cSub.MMEHost == "" {
-		return "", "", "S6c did not return a serving MME"
+		return "", "", "", "S6c did not return a serving MME"
 	}
 	if s6cSub.IMSI == "" {
-		return "", "", "S6c did not return an IMSI"
+		return "", "", "", "S6c did not return an IMSI"
 	}
-	return f.applyMMEMapping(s6cSub.MMEHost), s6cSub.IMSI, ""
+	if s6cSub.MMENumber == "" {
+		return "", "", "", "S6c did not return MME-Number-for-MT-SMS"
+	}
+	return f.applyMMEMapping(s6cSub.MMEHost), s6cSub.IMSI, s6cSub.MMENumber, ""
 }
 
 // applyMMEMapping translates an MME hostname via the S6c→SGd mapping table.

@@ -13,6 +13,7 @@ import (
 func (db *DB) GetSubscriber(ctx context.Context, msisdn string) (*store.Subscriber, error) {
 	const q = `
 		SELECT id, msisdn, COALESCE(imsi,''), ims_registered, lte_attached,
+		       COALESCE(mme_number,''),
 		       COALESCE(mme_host,''), mwd_set, created_at, updated_at
 		FROM subscribers
 		WHERE msisdn = ?`
@@ -33,12 +34,13 @@ func (db *DB) UpsertSubscriber(ctx context.Context, sub store.Subscriber) error 
 		sub.ID = newUUID()
 	}
 	const q = `
-		INSERT INTO subscribers (id, msisdn, imsi, ims_registered, lte_attached, mme_host, mwd_set)
-		VALUES (?, ?, NULLIF(?,''), ?, ?, NULLIF(?,''), ?)
+		INSERT INTO subscribers (id, msisdn, imsi, ims_registered, lte_attached, mme_number, mme_host, mwd_set)
+		VALUES (?, ?, NULLIF(?,''), ?, ?, NULLIF(?,''), NULLIF(?,''), ?)
 		ON CONFLICT (msisdn) DO UPDATE SET
 			imsi           = excluded.imsi,
 			ims_registered = excluded.ims_registered,
 			lte_attached   = excluded.lte_attached,
+			mme_number     = excluded.mme_number,
 			mme_host       = excluded.mme_host,
 			mwd_set        = excluded.mwd_set,
 			updated_at     = datetime('now')`
@@ -46,7 +48,7 @@ func (db *DB) UpsertSubscriber(ctx context.Context, sub store.Subscriber) error 
 	_, err := db.db.ExecContext(ctx, q,
 		sub.ID, sub.MSISDN, sub.IMSI,
 		boolInt(sub.IMSRegistered), boolInt(sub.LTEAttached),
-		sub.MMEHost, boolInt(sub.MWDSet))
+		sub.MMENumber, sub.MMEHost, boolInt(sub.MWDSet))
 	if err != nil {
 		return fmt.Errorf("upsert subscriber %s: %w", sub.MSISDN, err)
 	}
@@ -56,6 +58,7 @@ func (db *DB) UpsertSubscriber(ctx context.Context, sub store.Subscriber) error 
 func (db *DB) ListSubscribers(ctx context.Context) ([]store.Subscriber, error) {
 	const q = `
 		SELECT id, msisdn, COALESCE(imsi,''), ims_registered, lte_attached,
+		       COALESCE(mme_number,''),
 		       COALESCE(mme_host,''), mwd_set, created_at, updated_at
 		FROM subscribers ORDER BY msisdn`
 	rows, err := db.db.QueryContext(ctx, q)
@@ -77,6 +80,7 @@ func (db *DB) ListSubscribers(ctx context.Context) ([]store.Subscriber, error) {
 func (db *DB) GetSubscriberByID(ctx context.Context, id string) (*store.Subscriber, error) {
 	const q = `
 		SELECT id, msisdn, COALESCE(imsi,''), ims_registered, lte_attached,
+		       COALESCE(mme_number,''),
 		       COALESCE(mme_host,''), mwd_set, created_at, updated_at
 		FROM subscribers WHERE id = ?`
 	row := db.db.QueryRowContext(ctx, q, id)
@@ -104,7 +108,7 @@ func scanSubscriber(row sqlScanner) (*store.Subscriber, error) {
 	var createdStr, updatedStr string
 	err := row.Scan(
 		&s.ID, &s.MSISDN, &s.IMSI,
-		&imsReg, &lteAtt, &s.MMEHost, &mwd,
+		&imsReg, &lteAtt, &s.MMENumber, &s.MMEHost, &mwd,
 		&createdStr, &updatedStr,
 	)
 	if err != nil {

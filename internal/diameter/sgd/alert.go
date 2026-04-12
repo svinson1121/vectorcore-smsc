@@ -13,8 +13,8 @@ import (
 // This is triggered when a UE re-attaches and there are deferred MT messages
 // waiting in the store-and-forward queue.
 // msisdn is the subscriber E.164; scAddr is our SMSC address.
-func SendAlertSC(ctx context.Context, p *diameter.Peer, msisdn, scAddr string) error {
-	msg := buildAlertSCRequest(p.Cfg(), p.RemoteFQDN, p.RemoteRealm, msisdn, scAddr)
+func SendAlertSC(ctx context.Context, p *diameter.Peer, msisdn, scAddr, scAddrEncoding string) error {
+	msg := buildAlertSCRequest(p.Cfg(), p.RemoteFQDN, p.RemoteRealm, msisdn, scAddr, scAddrEncoding)
 	if err := p.Send(msg); err != nil {
 		return fmt.Errorf("sgd Alert-SC send: %w", err)
 	}
@@ -26,7 +26,7 @@ func SendAlertSC(ctx context.Context, p *diameter.Peer, msisdn, scAddr string) e
 	return nil
 }
 
-func buildAlertSCRequest(cfg diameter.Config, remoteFQDN, remoteRealm, msisdn, scAddr string) *dcodec.Message {
+func buildAlertSCRequest(cfg diameter.Config, remoteFQDN, remoteRealm, msisdn, scAddr, scAddrEncoding string) *dcodec.Message {
 	b := dcodec.NewRequest(dcodec.CmdAlertServiceCentre, dcodec.App3GPP_SGd)
 	b.Add(
 		dcodec.NewString(dcodec.CodeSessionID, 0, dcodec.FlagMandatory, newSessionID()),
@@ -40,7 +40,7 @@ func buildAlertSCRequest(cfg diameter.Config, remoteFQDN, remoteRealm, msisdn, s
 			encodeBCDMSISDN(msisdn)),
 		dcodec.NewOctetString(dcodec.CodeSCAddress, dcodec.Vendor3GPP,
 			dcodec.FlagMandatory|dcodec.FlagVendorSpecific,
-			encodeSCAddress(scAddr)),
+			encodeSCAddress(scAddr, scAddrEncoding)),
 	)
 	return b.Build()
 }

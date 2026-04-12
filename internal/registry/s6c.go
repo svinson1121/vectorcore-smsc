@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/svinson1121/vectorcore-smsc/internal/diameter/s6c"
 	"github.com/svinson1121/vectorcore-smsc/internal/store"
@@ -16,18 +17,32 @@ func (r *Registry) S6cLookup(ctx context.Context, msisdn string) (*store.Subscri
 	if err != nil {
 		return nil, err
 	}
-	if sub != nil && sub.LTEAttached && sub.MMEHost != "" && sub.IMSI != "" {
-		return sub, nil
-	}
 
 	r.mu.RLock()
+	ttl := r.s6cTTL
 	s6cc := r.s6cClient
 	r.mu.RUnlock()
+
+	if sub != nil && sub.LTEAttached && sub.MMEHost != "" && sub.IMSI != "" && s6cCacheFresh(sub, ttl) {
+		sub.MMENumber = s6c.NormalizeE164Address(sub.MMENumber)
+		slog.Debug("registry: S6c lookup (cached)",
+			"msisdn", msisdn,
+			"mme", sub.MMEHost,
+			"mme_number", sub.MMENumber,
+			"age", cacheAge(sub),
+			"ttl", ttl,
+		)
+		return sub, nil
+	}
 	if s6cc == nil {
 		return sub, nil
 	}
 
-	slog.Debug("registry: S6c fallback lookup", "msisdn", msisdn)
+	if sub != nil && sub.LTEAttached && sub.MMEHost != "" && sub.IMSI != "" && ttl > 0 {
+		slog.Debug("registry: S6c lookup", "msisdn", msisdn, "cache", "expired", "age", cacheAge(sub), "ttl", ttl)
+	} else {
+		slog.Debug("registry: S6c lookup", "msisdn", msisdn)
+	}
 
 	info, err := s6cc.LookupRouting(msisdn)
 	if err != nil {
@@ -47,21 +62,37 @@ func (r *Registry) S6cLookup(ctx context.Context, msisdn string) (*store.Subscri
 	refreshed.IMSI = info.IMSI
 	refreshed.LTEAttached = info.Attached
 	refreshed.MMEHost = info.MMEName
+	refreshed.MMENumber = s6c.NormalizeE164Address(info.MMENumber)
 	refreshed.MWDSet = info.MWDStatus != 0
 
 	if err := r.st.UpsertSubscriber(ctx, refreshed); err != nil {
-		slog.Warn("registry: S6c fallback upsert failed", "msisdn", msisdn, "err", err)
+		slog.Warn("registry: S6c upsert failed", "msisdn", msisdn, "err", err)
 	} else {
-		slog.Info("registry: S6c fallback populated",
+		slog.Info("registry: S6c populated",
 			"msisdn", msisdn,
 			"imsi", refreshed.IMSI,
 			"mme", refreshed.MMEHost,
+			"mme_number", refreshed.MMENumber,
 			"attached", refreshed.LTEAttached,
 			"mwd_set", refreshed.MWDSet,
 		)
 	}
 
 	return &refreshed, nil
+}
+
+func s6cCacheFresh(sub *store.Subscriber, ttl time.Duration) bool {
+	if sub == nil || ttl <= 0 || sub.UpdatedAt.IsZero() {
+		return false
+	}
+	return cacheAge(sub) <= ttl
+}
+
+func cacheAge(sub *store.Subscriber) time.Duration {
+	if sub == nil || sub.UpdatedAt.IsZero() {
+		return 0
+	}
+	return time.Since(sub.UpdatedAt)
 }
 
 func isS6cUnknown(err error, target **s6c.ErrUnknownUser) bool {

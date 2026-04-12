@@ -18,6 +18,7 @@ func TestBuildRequestIncludes3GPPHeadersAndFromTag(t *testing.T) {
 		},
 	}
 	msg := &codec.Message{}
+	msg.CorrelationID = "508a34a0-8061-4a17-936c-dec0a367e759"
 	msg.Destination.MSISDN = "3342012832"
 	msg.Source.MSISDN = "3342012834"
 
@@ -49,6 +50,9 @@ func TestBuildRequestIncludes3GPPHeadersAndFromTag(t *testing.T) {
 	}
 	if got := headerValue(req, "P-Asserted-Identity"); got != "<sip:smsc@smsc.ims.mnc435.mcc311.3gppnetwork.org>" {
 		t.Fatalf("unexpected P-Asserted-Identity: %q", got)
+	}
+	if got := headerValue(req, "Call-ID"); got != msg.CorrelationID {
+		t.Fatalf("unexpected Call-ID: %q", got)
 	}
 }
 

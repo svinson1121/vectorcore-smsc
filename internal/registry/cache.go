@@ -31,6 +31,7 @@ type Registry struct {
 	st        store.Store
 	shClient  ShClient // set via SetShClient; nil until wired
 	s6cClient S6cClient
+	s6cTTL    time.Duration
 }
 
 // S6cClient is reserved for S6c routing and notification flows.
@@ -43,8 +44,9 @@ type S6cClient interface {
 // and subscribes to future changes.
 func New(ctx context.Context, st store.Store) (*Registry, error) {
 	r := &Registry{
-		cache: make(map[string]*Registration),
-		st:    st,
+		cache:  make(map[string]*Registration),
+		st:     st,
+		s6cTTL: 300 * time.Second,
 	}
 	if err := r.loadAll(ctx); err != nil {
 		return nil, err
@@ -142,4 +144,16 @@ func storeToReg(s store.IMSRegistration) Registration {
 		Registered: s.Registered,
 		Expiry:     s.Expiry,
 	}
+}
+
+// SetS6cCacheTTL configures how long S6c subscriber routing data may be reused
+// before the registry performs a fresh HSS lookup.
+func (r *Registry) SetS6cCacheTTL(ttl time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ttl <= 0 {
+		r.s6cTTL = 0
+		return
+	}
+	r.s6cTTL = ttl
 }

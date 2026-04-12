@@ -675,6 +675,7 @@ type subscriberInput struct {
 	IMSI          string `json:"imsi,omitempty"`
 	IMSRegistered bool   `json:"ims_registered"`
 	LTEAttached   bool   `json:"lte_attached"`
+	MMENumber     string `json:"mme_number_for_mt_sms,omitempty"`
 	MMEHost       string `json:"mme_host,omitempty"`
 	MWDSet        bool   `json:"mwd_set"`
 }
@@ -715,7 +716,7 @@ func registerSubscribers(api huma.API, st store.Store) {
 		return nil, dbErr(st.UpsertSubscriber(ctx, store.Subscriber{
 			MSISDN: input.Body.MSISDN, IMSI: input.Body.IMSI,
 			IMSRegistered: input.Body.IMSRegistered, LTEAttached: input.Body.LTEAttached,
-			MMEHost: input.Body.MMEHost, MWDSet: input.Body.MWDSet,
+			MMENumber: input.Body.MMENumber, MMEHost: input.Body.MMEHost, MWDSet: input.Body.MWDSet,
 		}))
 	})
 
@@ -728,7 +729,7 @@ func registerSubscribers(api huma.API, st store.Store) {
 		return nil, dbErr(st.UpsertSubscriber(ctx, store.Subscriber{
 			ID: input.ID, MSISDN: input.Body.MSISDN, IMSI: input.Body.IMSI,
 			IMSRegistered: input.Body.IMSRegistered, LTEAttached: input.Body.LTEAttached,
-			MMEHost: input.Body.MMEHost, MWDSet: input.Body.MWDSet,
+			MMENumber: input.Body.MMENumber, MMEHost: input.Body.MMEHost, MWDSet: input.Body.MWDSet,
 		}))
 	})
 

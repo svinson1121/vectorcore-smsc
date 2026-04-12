@@ -20,6 +20,7 @@ import (
 
 const gracefulStopTimeout = 5 * time.Second
 const ofrTimeout = 5 * time.Second
+const moAnswerTimeout = 10 * time.Second
 
 // OnMessageFunc is called for each decoded MO/MT message.
 type OnMessageFunc func(msg *codec.Message, peerName string)
@@ -27,30 +28,39 @@ type OnMessageFunc func(msg *codec.Message, peerName string)
 // Server listens for inbound Diameter SGd connections from MMEs and can also
 // send MT messages (TFR) back to connected MMEs.
 type Server struct {
-	listenAddr string
-	transport  string
-	localFQDN  string
-	localRealm string
-	onMsg      OnMessageFunc
+	listenAddr     string
+	transport      string
+	localFQDN      string
+	localRealm     string
+	scAddrEncoding string
+	onMsg          OnMessageFunc
 
 	// Active peers keyed by RemoteFQDN (or remote addr for inbound before CEA).
 	mu            sync.RWMutex
 	peers         map[string]*diameter.Peer
 	outboundPeers map[string]*diameter.Peer // keyed by configured name
 	pendingOFR    map[uint32]chan *dcodec.Message
+	pendingMO     map[string]pendingMORequest
+}
+
+type pendingMORequest struct {
+	peer *diameter.Peer
+	req  *dcodec.Message
 }
 
 // NewServer creates an SGd server.
-func NewServer(transport, listenAddr, localFQDN, localRealm string, onMsg OnMessageFunc) *Server {
+func NewServer(transport, listenAddr, localFQDN, localRealm, scAddrEncoding string, onMsg OnMessageFunc) *Server {
 	s := &Server{
-		listenAddr:    listenAddr,
-		transport:     transport,
-		localFQDN:     localFQDN,
-		localRealm:    localRealm,
-		onMsg:         onMsg,
-		peers:         make(map[string]*diameter.Peer),
-		outboundPeers: make(map[string]*diameter.Peer),
-		pendingOFR:    make(map[uint32]chan *dcodec.Message),
+		listenAddr:     listenAddr,
+		transport:      transport,
+		localFQDN:      localFQDN,
+		localRealm:     localRealm,
+		scAddrEncoding: scAddrEncoding,
+		onMsg:          onMsg,
+		peers:          make(map[string]*diameter.Peer),
+		outboundPeers:  make(map[string]*diameter.Peer),
+		pendingOFR:     make(map[uint32]chan *dcodec.Message),
+		pendingMO:      make(map[string]pendingMORequest),
 	}
 	return s
 }
@@ -234,7 +244,7 @@ func (s *Server) SendOFR(ctx context.Context, msg *codec.Message, mmeHost, scAdd
 		return fmt.Errorf("sgd: no active peer for MME %q", mmeHost)
 	}
 
-	avps, err := sgdcodec.EncodeOFR(msg, scAddr)
+	avps, err := sgdcodec.EncodeOFR(msg, scAddr, s.scAddrEncoding)
 	if err != nil {
 		return fmt.Errorf("sgd OFR encode: %w", err)
 	}
@@ -354,6 +364,104 @@ func (s *Server) untrackPendingOFR(hopByHop uint32) {
 	s.mu.Lock()
 	delete(s.pendingOFR, hopByHop)
 	s.mu.Unlock()
+}
+
+func (s *Server) trackPendingMO(messageID string, p *diameter.Peer, req *dcodec.Message) {
+	s.mu.Lock()
+	s.pendingMO[messageID] = pendingMORequest{peer: p, req: req}
+	s.mu.Unlock()
+}
+
+func (s *Server) finishPendingMO(messageID string, resultCode uint32, smRPUI []byte) bool {
+	s.mu.Lock()
+	pending, ok := s.pendingMO[messageID]
+	if ok {
+		delete(s.pendingMO, messageID)
+	}
+	s.mu.Unlock()
+	if !ok {
+		return false
+	}
+
+	extra := []*dcodec.AVP(nil)
+	if len(smRPUI) > 0 {
+		extra = append(extra, dcodec.NewOctetString(
+			dcodec.CodeSMRPUI,
+			dcodec.Vendor3GPP,
+			dcodec.FlagMandatory|dcodec.FlagVendorSpecific,
+			smRPUI,
+		))
+	}
+	sendAnswerWithAVPs(pending.peer, pending.req, resultCode, extra...)
+	return true
+}
+
+// CompleteMO completes a pending inbound SGd MO request using the correlated
+// downstream RP result body from ISC.
+func (s *Server) CompleteMO(messageID string, rpBody []byte) bool {
+	resultCode, smRPUI := mapISCResultToSGdAnswer(rpBody)
+	return s.finishPendingMO(messageID, resultCode, smRPUI)
+}
+
+func (s *Server) timeoutPendingMO(messageID string) {
+	timer := time.NewTimer(moAnswerTimeout)
+	defer timer.Stop()
+
+	<-timer.C
+	if s.finishPendingMO(messageID, dcodec.DiameterUnableToComply, nil) {
+		slog.Warn("sgd MO completion timed out", "id", messageID, "timeout", moAnswerTimeout)
+	}
+}
+
+func (s *Server) handleMOForwardRequest(p *diameter.Peer, req *dcodec.Message) {
+	msg, err := sgdcodec.DecodeTFR(req)
+	if err != nil {
+		slog.Error("sgd TFR decode failed", "peer", p.RemoteFQDN, "err", err)
+		sendAnswer(p, req, dcodec.DiameterUnableToComply)
+		return
+	}
+
+	msg.IngressPeer = p.RemoteFQDN
+	msg.IngressInterface = codec.InterfaceSGd
+	msg.CorrelationID = newSessionID()
+
+	slog.Info("sgd TFR received (MO)",
+		"peer", p.RemoteFQDN,
+		"src", msg.Source.MSISDN,
+		"dst", msg.Destination.MSISDN,
+		"encoding", msg.Encoding,
+		"corr_id", msg.CorrelationID,
+	)
+	slog.Debug("sgd TFR decoded",
+		"peer", p.RemoteFQDN,
+		"src", msg.Source.MSISDN,
+		"dst", msg.Destination.MSISDN,
+		"tp_mr", msg.TPMR,
+		"binary_len", len(msg.Binary),
+		"corr_id", msg.CorrelationID,
+	)
+
+	s.trackPendingMO(msg.CorrelationID, p, req)
+	go s.timeoutPendingMO(msg.CorrelationID)
+
+	if s.onMsg != nil {
+		s.onMsg(msg, p.RemoteFQDN)
+		return
+	}
+
+	s.finishPendingMO(msg.CorrelationID, dcodec.DiameterUnableToComply, nil)
+}
+
+func mapISCResultToSGdAnswer(body []byte) (uint32, []byte) {
+	if len(body) == 0 {
+		return dcodec.DiameterUnableToComply, nil
+	}
+	switch body[0] & 0x07 {
+	case 0x02, 0x03:
+		return dcodec.DiameterSuccess, encodeSubmitReportAck(time.Now().UTC())
+	default:
+		return dcodec.DiameterUnableToComply, nil
+	}
 }
 
 func resultCode(msg *dcodec.Message) uint32 {
@@ -509,7 +617,7 @@ func (s *Server) dispatch(p *diameter.Peer, msg *dcodec.Message) {
 			return
 		}
 	case cmd == dcodec.CmdMOForwardShortMessage && isReq:
-		HandleTFR(p, msg, s.onMsg)
+		s.handleMOForwardRequest(p, msg)
 	default:
 		slog.Debug("diameter SGd unhandled command",
 			"cmd", cmd, "request", isReq)

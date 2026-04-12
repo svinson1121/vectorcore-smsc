@@ -8,6 +8,7 @@ package sgd
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 
 	"github.com/svinson1121/vectorcore-smsc/internal/codec"
 	"github.com/svinson1121/vectorcore-smsc/internal/codec/tpdu"
@@ -44,16 +45,13 @@ func decodeSMRPUI(msg *dcodec.Message, iface codec.InterfaceType) (*codec.Messag
 		canonical.Destination.IMSI = imsi
 	}
 
-	// Extract MSISDN from User-Identifier or MSISDN AVP if not set by tpdu
+	// For MO SMS-SUBMIT over SGd, TPDU carries only TP-DA. The subscriber
+	// originator must come from User-Identifier/MSISDN rather than SC-Address.
+	if canonical.Source.MSISDN == "" {
+		canonical.Source.MSISDN = strings.TrimPrefix(msisdn, "+")
+	}
 	if canonical.Destination.MSISDN == "" {
 		canonical.Destination.MSISDN = msisdn
-	}
-
-	// SC-Address (BCD) → source on TFR (MO)
-	if canonical.Source.MSISDN == "" {
-		if a := msg.FindAVP(dcodec.CodeSCAddress, dcodec.Vendor3GPP); a != nil {
-			canonical.Source.MSISDN = decodeSCAddress(a.Data)
-		}
 	}
 
 	return canonical, nil
@@ -101,22 +99,25 @@ func decodeUserIdentifier(msg *dcodec.Message) (imsi, msisdn string) {
 //
 //	length byte | nature-of-address byte | BCD digits (semi-octets, F as filler)
 func decodeBCDMSISDN(data []byte) string {
-	if len(data) < 2 {
+	if len(data) == 0 {
 		return ""
 	}
-	// Skip length byte if first byte looks like a length (< len of remaining data)
 	offset := 0
+	international := false
+
+	// Peers are inconsistent here. We see:
+	//   len | TON/NPI | BCD digits
+	//   len | BCD digits
+	//   TON/NPI | BCD digits
+	// Support all three so the first digit octet is not lost.
 	if data[0] < byte(len(data)) {
-		offset = 1 // skip length octet
+		offset = 1
 	}
-	if offset >= len(data) {
-		return ""
+	if offset < len(data) && data[offset]&0x80 != 0 {
+		noa := data[offset]
+		offset++
+		international = (noa>>4)&0x7 == 1
 	}
-	// nature-of-address: bit 7=1, bits 6-4=TON, bits 3-0=NPI
-	// For international, TON=1 → prefix +
-	noa := data[offset]
-	offset++
-	international := (noa>>4)&0x7 == 1
 
 	digits := decodeBCDDigits(data[offset:])
 	if international {
@@ -132,10 +133,22 @@ func decodeSCAddress(data []byte) string {
 	if len(data) == 0 {
 		return ""
 	}
+	if isASCIIDigits(data) {
+		return string(data)
+	}
 	if data[0] < 0x80 {
 		return decodeBCDDigits(data)
 	}
 	return decodeBCDMSISDN(data)
+}
+
+func isASCIIDigits(data []byte) bool {
+	for _, b := range data {
+		if b < '0' || b > '9' {
+			return false
+		}
+	}
+	return len(data) > 0
 }
 
 // decodeBCDDigits decodes packed semi-octet BCD, stopping at 0xF filler.
@@ -190,15 +203,36 @@ func encodeBCDDigits(digits string) []byte {
 	return buf
 }
 
+type SCAddressEncoding string
+
+const (
+	SCAddressEncodingTBCD        SCAddressEncoding = "tbcd"
+	SCAddressEncodingASCIIDigits SCAddressEncoding = "ascii_digits"
+)
+
 // encodeSCAddress encodes a Service Centre address for SM-RP-OA.
-func encodeSCAddress(sc string) []byte {
+func encodeSCAddress(sc string, encoding string) []byte {
 	if sc == "" {
 		return nil
 	}
 	if sc[0] == '+' {
 		sc = sc[1:]
 	}
+	if normalizeSCAddressEncoding(encoding) == SCAddressEncodingASCIIDigits {
+		return []byte(sc)
+	}
 	return encodeBCDDigits(sc)
+}
+
+func normalizeSCAddressEncoding(v string) SCAddressEncoding {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", string(SCAddressEncodingTBCD):
+		return SCAddressEncodingTBCD
+	case string(SCAddressEncodingASCIIDigits):
+		return SCAddressEncodingASCIIDigits
+	default:
+		return SCAddressEncodingTBCD
+	}
 }
 
 // uint16BE returns a big-endian uint16 from 2 bytes.

@@ -29,7 +29,8 @@ type LogConfig struct {
 }
 
 type SMSCConfig struct {
-	Address string `yaml:"address"` // SMSC E.164 / GT — used across all interfaces
+	Address              string `yaml:"address"`                 // SMSC E.164 / GT — used across all interfaces
+	SGdSCAddressEncoding string `yaml:"sgd_sc_address_encoding"` // tbcd | ascii_digits
 }
 
 type SMPPConfig struct {
@@ -80,12 +81,13 @@ type SIPISCConfig struct {
 }
 
 type DiameterConfig struct {
-	Address    string `yaml:"address"`
-	Port       int    `yaml:"port"`
-	Listen     string `yaml:"listen"`    // legacy; overridden by address+port if set
-	Transport  string `yaml:"transport"` // tcp | sctp
-	LocalFQDN  string `yaml:"local_fqdn"`
-	LocalRealm string `yaml:"local_realm"`
+	Address     string        `yaml:"address"`
+	Port        int           `yaml:"port"`
+	Listen      string        `yaml:"listen"`    // legacy; overridden by address+port if set
+	Transport   string        `yaml:"transport"` // tcp | sctp
+	LocalFQDN   string        `yaml:"local_fqdn"`
+	LocalRealm  string        `yaml:"local_realm"`
+	S6CCacheTTL time.Duration `yaml:"s6c_cache_ttl"`
 }
 
 type DatabaseConfig struct {
@@ -114,6 +116,9 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
+	if c.SMSC.SGdSCAddressEncoding == "" {
+		c.SMSC.SGdSCAddressEncoding = "tbcd"
+	}
 	// Build Listen addresses from address+port fields when provided.
 	if c.SMPP.Server.Address != "" || c.SMPP.Server.Port != 0 {
 		addr := c.SMPP.Server.Address
@@ -197,6 +202,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Diameter.LocalRealm == "" {
 		c.Diameter.LocalRealm = "local"
+	}
+	if c.Diameter.S6CCacheTTL == 0 {
+		c.Diameter.S6CCacheTTL = 300 * time.Second
 	}
 	if c.SIP.FQDN == "" {
 		// Prefer explicit Diameter identity when SIP identity isn't set.

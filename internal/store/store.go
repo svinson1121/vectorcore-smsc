@@ -33,6 +33,7 @@ type Subscriber struct {
 	IMSI          string    `json:"imsi"`
 	IMSRegistered bool      `json:"ims_registered"`
 	LTEAttached   bool      `json:"lte_attached"`
+	MMENumber     string    `json:"mme_number_for_mt_sms"`
 	MMEHost       string    `json:"mme_host"`
 	MWDSet        bool      `json:"mwd_set"`
 	CreatedAt     time.Time `json:"created_at"`

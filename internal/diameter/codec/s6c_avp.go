@@ -5,6 +5,7 @@ const (
 	CodeServingNode               uint32 = 2401 // Grouped
 	CodeMMEName                   uint32 = 2402 // DiameterIdentity
 	CodeMMENumberForMTSMSS6c      uint32 = 2403 // OctetString
+	CodeMMENumberForMTSMSServing  uint32 = 1645 // OctetString
 	CodeAdditionalServingNode     uint32 = 2406 // Grouped
 	CodeMMERealm                  uint32 = 2408 // DiameterIdentity
 	CodeSGSNName                  uint32 = 2409 // DiameterIdentity

@@ -8,7 +8,7 @@ import (
 )
 
 func TestSelectPeerForMMELockedPrefersDirectMMEPeer(t *testing.T) {
-	s := NewServer("tcp", ":0", "smsc.example.net", "example.net", nil)
+	s := NewServer("tcp", ":0", "smsc.example.net", "example.net", "tbcd", nil)
 	direct := diameter.NewPeer(diameter.Config{Name: "mme-direct", Application: "sgd"})
 	proxy := diameter.NewPeer(diameter.Config{Name: "dra01", Application: "sgd"})
 	proxy.RemoteFQDN = "dra01.example.net"
@@ -27,7 +27,7 @@ func TestSelectPeerForMMELockedPrefersDirectMMEPeer(t *testing.T) {
 }
 
 func TestSelectPeerForMMELockedFallsBackToActiveOutboundProxy(t *testing.T) {
-	s := NewServer("tcp", ":0", "smsc.example.net", "example.net", nil)
+	s := NewServer("tcp", ":0", "smsc.example.net", "example.net", "tbcd", nil)
 	proxy := diameter.NewPeer(diameter.Config{Name: "dra01", Application: "sgd"})
 	proxy.RemoteFQDN = "dra01.example.net"
 	proxy.RemoteRealm = "example.net"
@@ -54,7 +54,7 @@ func TestDestinationRealmForPeerFallsBackToMMEHostRealm(t *testing.T) {
 }
 
 func TestRoutePeerForMMEReturnsProxyDetails(t *testing.T) {
-	s := NewServer("tcp", ":0", "smsc.example.net", "example.net", nil)
+	s := NewServer("tcp", ":0", "smsc.example.net", "example.net", "tbcd", nil)
 	proxy := diameter.NewPeer(diameter.Config{Name: "dra01", Application: "sgd"})
 	proxy.RemoteFQDN = "dra01.example.net"
 
@@ -74,7 +74,7 @@ func TestRoutePeerForMMEReturnsProxyDetails(t *testing.T) {
 }
 
 func TestDispatchRoutesOFAAnswerToPendingSender(t *testing.T) {
-	s := NewServer("tcp", ":0", "smsc.example.net", "example.net", nil)
+	s := NewServer("tcp", ":0", "smsc.example.net", "example.net", "tbcd", nil)
 	replyCh := make(chan *dcodec.Message, 1)
 	hopByHop := uint32(12345)
 	s.trackPendingOFR(hopByHop, replyCh)
@@ -101,5 +101,51 @@ func TestDispatchRoutesOFAAnswerToPendingSender(t *testing.T) {
 		}
 	default:
 		t.Fatal("pending OFA was not delivered to sender")
+	}
+}
+
+func TestCompleteMORemovesPendingEntry(t *testing.T) {
+	s := NewServer("tcp", ":0", "smsc.example.net", "example.net", "tbcd", nil)
+	p := diameter.NewPeer(diameter.Config{Name: "mme01", Application: "sgd"})
+	req := dcodec.NewRequest(dcodec.CmdMOForwardShortMessage, dcodec.App3GPP_SGd).Build()
+
+	s.trackPendingMO("message-123", p, req)
+	if !s.CompleteMO("message-123", []byte{0x03, 0x01}) {
+		t.Fatal("CompleteMO() = false, want true")
+	}
+	if s.CompleteMO("message-123", []byte{0x03, 0x01}) {
+		t.Fatal("CompleteMO() second call = true, want false")
+	}
+}
+
+func TestMapISCResultToSGdAnswerBuildsSubmitReportAck(t *testing.T) {
+	resultCode, smRPUI := mapISCResultToSGdAnswer([]byte{0x02, 0x01, 0x41, 0x02, 0x00, 0x00})
+	if got, want := resultCode, dcodec.DiameterSuccess; got != want {
+		t.Fatalf("resultCode = %d, want %d", got, want)
+	}
+	if len(smRPUI) != 9 {
+		t.Fatalf("len(smRPUI) = %d, want 9", len(smRPUI))
+	}
+	if got, want := smRPUI[0], byte(0x01); got != want {
+		t.Fatalf("SM-RP-UI[0] = 0x%02x, want 0x%02x", got, want)
+	}
+	if got, want := smRPUI[1], byte(0x00); got != want {
+		t.Fatalf("SM-RP-UI[1] = 0x%02x, want 0x%02x", got, want)
+	}
+}
+
+func TestAuthSessionStateFromRequestUsesRequestValue(t *testing.T) {
+	req := dcodec.NewRequest(dcodec.CmdMOForwardShortMessage, dcodec.App3GPP_SGd)
+	req.Add(dcodec.NewUint32(dcodec.CodeAuthSessionState, 0, dcodec.FlagMandatory, 7))
+	avp := authSessionStateFromRequest(req.Build())
+	if got, err := avp.Uint32(); err != nil || got != 7 {
+		t.Fatalf("authSessionStateFromRequest() = (%d, %v), want (7, nil)", got, err)
+	}
+}
+
+func TestAuthSessionStateFromRequestDefaultsToNoStateMaintained(t *testing.T) {
+	avp := authSessionStateFromRequest(nil)
+	if got, err := avp.Uint32(); err != nil || got != dcodec.AuthSessionStateNoStateMaintained {
+		t.Fatalf("default auth session state = (%d, %v), want (%d, nil)", got, err, dcodec.AuthSessionStateNoStateMaintained)
 	}
 }

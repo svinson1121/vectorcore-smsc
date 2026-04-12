@@ -124,6 +124,7 @@ func (c *Correlator) reportS6c(ctx context.Context, m store.Message, status stri
 		"id", m.ID,
 		"dst", m.DstMSISDN,
 		"imsi", imsi,
+		"sc_addr", c.scAddr,
 		"status", status,
 		"cause", cause,
 	)

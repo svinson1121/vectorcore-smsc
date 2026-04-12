@@ -211,6 +211,7 @@ func run(cfgPath string) error {
 	if err != nil {
 		return fmt.Errorf("init registry: %w", err)
 	}
+	reg.SetS6cCacheTTL(cfg.Diameter.S6CCacheTTL)
 
 	// ── Routing engine ────────────────────────────────────────────────────────
 	routingEngine := routing.NewEngine()
@@ -274,6 +275,7 @@ func run(cfgPath string) error {
 		cfg.Diameter.Listen,
 		cfg.Diameter.LocalFQDN,
 		cfg.Diameter.LocalRealm,
+		cfg.SMSC.SGdSCAddressEncoding,
 		nil, // set below
 	)
 
@@ -397,6 +399,11 @@ func run(cfgPath string) error {
 	msgHandler := &isc.MessageHandler{
 		OnMessage: func(msg *codec.Message) {
 			fwd.Dispatch(ctx, msg)
+		},
+		OnResult: func(inReplyTo string, body []byte) {
+			if !sgdServer.CompleteMO(inReplyTo, body) {
+				slog.Debug("ISC result had no pending SGd MO match", "in_reply_to", inReplyTo)
+			}
 		},
 		Client:   sipClient,
 		SIPLocal: sipLocalURI,

@@ -58,3 +58,57 @@ func TestReplyTargetURIPrefersPAI(t *testing.T) {
 		t.Fatalf("unexpected reply target: %q", got)
 	}
 }
+
+func TestHandleInvokesOnResultForRPAck(t *testing.T) {
+	var target sip.Uri
+	if err := sip.ParseUri("sip:3342012834@ims.mnc435.mcc311.3gppnetwork.org", &target); err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	req := sip.NewRequest(sip.MESSAGE, target)
+	req.AppendHeader(&sip.ViaHeader{Params: sip.NewParams(), Host: "10.90.250.52", Port: 5060, Transport: "UDP"})
+	req.AppendHeader(&sip.FromHeader{Address: target, Params: sip.NewParams()})
+	req.AppendHeader(&sip.ToHeader{Address: target, Params: sip.NewParams()})
+	callID := sip.CallIDHeader("reply-test")
+	req.AppendHeader(&callID)
+	req.AppendHeader(&sip.CSeqHeader{SeqNo: 1, MethodName: sip.MESSAGE})
+	req.AppendHeader(sip.NewHeader("Content-Type", "application/vnd.3gpp.sms"))
+	req.AppendHeader(sip.NewHeader("In-Reply-To", "message-123"))
+	req.SetBody([]byte{0x03, 0x01})
+
+	var gotReplyTo string
+	var gotBody []byte
+	h := &MessageHandler{
+		OnResult: func(inReplyTo string, body []byte) {
+			gotReplyTo = inReplyTo
+			gotBody = append([]byte(nil), body...)
+		},
+	}
+
+	tx := &stubServerTx{}
+	h.Handle(req, tx)
+
+	if gotReplyTo != "message-123" {
+		t.Fatalf("OnResult inReplyTo = %q, want %q", gotReplyTo, "message-123")
+	}
+	if len(gotBody) != 2 || gotBody[0] != 0x03 || gotBody[1] != 0x01 {
+		t.Fatalf("OnResult body = %v, want [3 1]", gotBody)
+	}
+	if tx.last == nil || tx.last.StatusCode != sip.StatusOK {
+		t.Fatalf("unexpected response: %#v", tx.last)
+	}
+}
+
+type stubServerTx struct {
+	last *sip.Response
+}
+
+func (s *stubServerTx) Respond(resp *sip.Response) error {
+	s.last = resp
+	return nil
+}
+
+func (s *stubServerTx) Acks() <-chan *sip.Request    { return nil }
+func (s *stubServerTx) Cancels() <-chan *sip.Request { return nil }
+func (s *stubServerTx) Terminate()                   {}
+func (s *stubServerTx) Done() <-chan struct{}        { return nil }
+func (s *stubServerTx) Err() error                   { return nil }

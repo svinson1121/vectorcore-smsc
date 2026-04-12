@@ -24,12 +24,13 @@ const (
 
 // Address holds all address representations for a message endpoint.
 type Address struct {
-	MSISDN string // E.164 digits without leading +, e.g. "14155551234"
-	IMSI   string // IMSI digits, e.g. "311435000070570"
-	SIPURI string // Full SIP URI, e.g. "sip:+14155551234@ims.example.com"
-	Alpha  string // Alphanumeric sender ID (SMPP source)
-	TON    byte   // SMPP Type of Number
-	NPI    byte   // SMPP Numbering Plan Indicator
+	MSISDN    string // E.164 digits without leading +, e.g. "14155551234"
+	IMSI      string // IMSI digits, e.g. "311435000070570"
+	MMENumber string // MME-Number-for-MT-SMS / MME GT used for SGd delivery
+	SIPURI    string // Full SIP URI, e.g. "sip:+14155551234@ims.example.com"
+	Alpha     string // Alphanumeric sender ID (SMPP source)
+	TON       byte   // SMPP Type of Number
+	NPI       byte   // SMPP Numbering Plan Indicator
 }
 
 // ConcatInfo carries the UDH concatenation reference for a message segment.
@@ -49,10 +50,11 @@ type UDH struct {
 // All codecs convert to and from this type; the routing engine and forwarder operate
 // exclusively on *Message.
 type Message struct {
-	ID          string
-	SMPPMsgID   string // SMPP protocol message-id (submit_sm_resp), separate from internal DB ID
-	Source      Address
-	Destination Address
+	ID            string
+	CorrelationID string
+	SMPPMsgID     string // SMPP protocol message-id (submit_sm_resp), separate from internal DB ID
+	Source        Address
+	Destination   Address
 
 	// Decoded text payload (EncodingGSM7 / EncodingUCS2 / EncodingUTF8).
 	// Always UTF-8 internally; re-encoded on egress.

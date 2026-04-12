@@ -10,16 +10,16 @@ import (
 
 // EncodeOFR builds the AVPs for an OFR (MT-Forward-Short-Message-Request).
 // The caller builds the full Diameter request and adds the returned AVPs.
-func EncodeOFR(msg *codec.Message, scAddr string) ([]*dcodec.AVP, error) {
-	return encodeForwardSM(msg, scAddr, dcodec.SMRPMTIDeliver)
+func EncodeOFR(msg *codec.Message, scAddr, scAddrEncoding string) ([]*dcodec.AVP, error) {
+	return encodeForwardSM(msg, scAddr, scAddrEncoding, dcodec.SMRPMTIDeliver)
 }
 
 // EncodeTFR builds the AVPs for a TFR (MO-Forward-Short-Message-Request).
-func EncodeTFR(msg *codec.Message, scAddr string) ([]*dcodec.AVP, error) {
-	return encodeForwardSM(msg, scAddr, dcodec.SMRPMTISubmit)
+func EncodeTFR(msg *codec.Message, scAddr, scAddrEncoding string) ([]*dcodec.AVP, error) {
+	return encodeForwardSM(msg, scAddr, scAddrEncoding, dcodec.SMRPMTISubmit)
 }
 
-func encodeForwardSM(msg *codec.Message, scAddr string, mti int) ([]*dcodec.AVP, error) {
+func encodeForwardSM(msg *codec.Message, scAddr, scAddrEncoding string, mti int) ([]*dcodec.AVP, error) {
 	// Encode the canonical message to TP-DATA
 	var tpData []byte
 	var err error
@@ -39,6 +39,14 @@ func encodeForwardSM(msg *codec.Message, scAddr string, mti int) ([]*dcodec.AVP,
 			return nil, fmt.Errorf("sgd encode: destination IMSI required for MT")
 		}
 		avps = append(avps, dcodec.NewString(dcodec.CodeUserName, 0, dcodec.FlagMandatory, msg.Destination.IMSI))
+		if msg.Destination.MMENumber != "" {
+			avps = append(avps, dcodec.NewOctetString(
+				dcodec.CodeMMENumberForMTSMSServing,
+				dcodec.Vendor3GPP,
+				dcodec.FlagMandatory|dcodec.FlagVendorSpecific,
+				encodeBCDDigits(msg.Destination.MMENumber),
+			))
+		}
 	}
 
 	avps = append(avps,
@@ -49,7 +57,7 @@ func encodeForwardSM(msg *codec.Message, scAddr string, mti int) ([]*dcodec.AVP,
 
 	// SC-Address (vendor 10415) — raw TBCD digits, international format.
 	scAVP := dcodec.NewOctetString(dcodec.CodeSCAddress, dcodec.Vendor3GPP,
-		dcodec.FlagMandatory|dcodec.FlagVendorSpecific, encodeSCAddress(scAddr))
+		dcodec.FlagMandatory|dcodec.FlagVendorSpecific, encodeSCAddress(scAddr, scAddrEncoding))
 	avps = append(avps, scAVP)
 
 	// MO over SGd can identify the UE directly via MSISDN.
@@ -65,7 +73,7 @@ func encodeForwardSM(msg *codec.Message, scAddr string, mti int) ([]*dcodec.AVP,
 
 // EncodeRSR builds AVPs for a Report-SM-Delivery-Status-Request (RSR).
 // outcome: 0=success, 1=absent, 2=other-error (SMSGWDeliveryOutcome values)
-func EncodeRSR(msisdn, scAddr string, outcome uint32) ([]*dcodec.AVP, error) {
+func EncodeRSR(msisdn, scAddr, scAddrEncoding string, outcome uint32) ([]*dcodec.AVP, error) {
 	smOutcome, err := dcodec.NewGrouped(
 		dcodec.CodeSMDeliveryOutcome, dcodec.Vendor3GPP,
 		dcodec.FlagMandatory|dcodec.FlagVendorSpecific,
@@ -84,7 +92,7 @@ func EncodeRSR(msisdn, scAddr string, outcome uint32) ([]*dcodec.AVP, error) {
 			encodeBCDMSISDN(msisdn)),
 		dcodec.NewOctetString(dcodec.CodeSCAddress, dcodec.Vendor3GPP,
 			dcodec.FlagMandatory|dcodec.FlagVendorSpecific,
-			encodeSCAddress(scAddr)),
+			encodeSCAddress(scAddr, scAddrEncoding)),
 		smOutcome,
 	}
 	return avps, nil

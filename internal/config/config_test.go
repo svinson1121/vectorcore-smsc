@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadSupportsNewSMPPTLSLayout(t *testing.T) {
@@ -37,6 +38,17 @@ smpp:
 	}
 	if got := cfg.SMPPOutboundServerCAFile(); got != "/tmp/server-ca.crt" {
 		t.Fatalf("SMPPOutboundServerCAFile() = %q", got)
+	}
+}
+
+func TestLoadParsesS6cCacheTTL(t *testing.T) {
+	cfg := loadTestConfig(t, `
+diameter:
+  s6c_cache_ttl: 300s
+`)
+
+	if got := cfg.Diameter.S6CCacheTTL; got != 300*time.Second {
+		t.Fatalf("S6CCacheTTL = %v, want 300s", got)
 	}
 }
 

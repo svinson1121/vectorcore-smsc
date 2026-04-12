@@ -19,6 +19,7 @@ type RoutingInfo struct {
 	MSISDN     string
 	Attached   bool
 	MMEName    string
+	MMENumber  string
 	MMERealm   string
 	MWDStatus  uint32
 	SessionID  string

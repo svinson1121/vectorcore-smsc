@@ -22,6 +22,9 @@ import (
 type MessageHandler struct {
 	// OnMessage is called after successful decode.  nil is valid in Phase 1.
 	OnMessage func(msg *codec.Message)
+	// OnResult is called for inbound RP-ACK / RP-ERROR carrying the body linked
+	// by In-Reply-To to a previously sent MESSAGE.
+	OnResult func(inReplyTo string, body []byte)
 	Client    *sipgo.Client
 	SIPLocal  string
 	Settings  Settings
@@ -50,7 +53,14 @@ func (h *MessageHandler) Handle(req *sip.Request, tx sip.ServerTransaction) {
 	}
 	if msg == nil {
 		// RP-ACK, RP-ERROR, or RP-SMMA — acknowledge and done.
-		slog.Debug("ISC RP-ACK/RP-ERROR received", "from", req.From())
+		inReplyTo := ""
+		if hdr := req.GetHeader("In-Reply-To"); hdr != nil {
+			inReplyTo = strings.TrimSpace(hdr.Value())
+		}
+		slog.Debug("ISC RP-ACK/RP-ERROR received", "from", req.From(), "in_reply_to", inReplyTo)
+		if h.OnResult != nil && inReplyTo != "" && len(body) > 0 {
+			h.OnResult(inReplyTo, append([]byte(nil), body...))
+		}
 		respond(tx, req, sip.StatusOK, "OK")
 		return
 	}

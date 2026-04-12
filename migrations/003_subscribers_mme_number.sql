@@ -1,0 +1,2 @@
+ALTER TABLE subscribers
+ADD COLUMN IF NOT EXISTS mme_number TEXT;

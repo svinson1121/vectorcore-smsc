@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS subscribers (
     imsi            TEXT,
     ims_registered  BOOLEAN NOT NULL DEFAULT false,
     lte_attached    BOOLEAN NOT NULL DEFAULT false,
+    mme_number      TEXT,
     mme_host        TEXT,
     mwd_set         BOOLEAN NOT NULL DEFAULT false,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
