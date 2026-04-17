@@ -35,13 +35,18 @@ type ReportDeliveryResult struct {
 
 // AlertServiceCentreRequest is the decoded inbound ALSC payload.
 type AlertServiceCentreRequest struct {
-	SessionID              string
-	OriginHost             string
-	OriginRealm            string
-	MSISDN                 string
-	IMSI                   string
-	SCAddress              string
-	AbsentUserDiagnosticSM uint32
+	SessionID                 string
+	OriginHost                string
+	OriginRealm               string
+	MSISDN                    string
+	IMSI                      string
+	SCAddress                 string
+	AlertCorrelationID        string
+	AlertReason               uint32
+	ServingNode               string
+	MaximumUEAvailabilityTime *time.Time
+	SMSGMSCAlertEvent         uint32
+	AbsentUserDiagnosticSM    uint32
 }
 
 // Client manages S6c requests over a shared Diameter peer.
@@ -138,8 +143,9 @@ func (c *Client) LookupRouting(msisdn string) (*RoutingInfo, error) {
 	}
 }
 
-// ReportDelivery sends RSDS for the given subscriber outcome.
-func (c *Client) ReportDelivery(msisdn, imsi, scAddr string, cause uint32, diagnostic *uint32) (*ReportDeliveryResult, error) {
+// ReportDelivery sends RSDS for the given subscriber outcome using the current
+// Rel-15-oriented HSS contract.
+func (c *Client) ReportDelivery(msisdn, imsi, scAddr, alertCorrelationID string, cause uint32, diagnostic *uint32) (*ReportDeliveryResult, error) {
 	if c.peer.State() != diameter.StateOpen {
 		return nil, fmt.Errorf("s6c: peer not OPEN (state=%s)", c.peer.State())
 	}
@@ -176,10 +182,15 @@ func (c *Client) ReportDelivery(msisdn, imsi, scAddr string, cause uint32, diagn
 		dcodec.NewUint32(dcodec.CodeSMRPMTIS6c, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, dcodec.SMRPMTIS6cDeliver),
 		deliveryOutcome,
 	)
-	if imsi != "" {
-		b.Add(dcodec.NewString(dcodec.CodeUserName, 0, dcodec.FlagMandatory, imsi))
-	} else if msisdn != "" {
-		b.Add(dcodec.NewOctetString(dcodec.CodeMSISDN, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, encodeTBCD(msisdn)))
+	if userIdentifier := buildUserIdentifier(imsi, msisdn); userIdentifier != nil {
+		b.Add(userIdentifier)
+	}
+	if alertCorrelationID != "" {
+		if payload, err := decodeAlertCorrelationID(alertCorrelationID); err == nil && len(payload) > 0 {
+			b.Add(dcodec.NewOctetString(dcodec.CodeSMSMICorrelationID, dcodec.Vendor3GPP, dcodec.FlagVendorSpecific, payload))
+		} else if err != nil {
+			slog.Warn("s6c RSDS invalid alert correlation id", "peer", c.peer.Name(), "alert_correlation_id", alertCorrelationID, "err", err)
+		}
 	}
 
 	msg := b.Build()

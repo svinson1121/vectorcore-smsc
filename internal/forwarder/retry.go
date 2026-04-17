@@ -48,22 +48,30 @@ func (r *RetryScheduler) tick(ctx context.Context) {
 }
 
 func (r *RetryScheduler) dispatch(ctx context.Context, m store.Message) {
-	// Mark as dispatched so a concurrent sweep doesn't double-deliver.
-	if err := r.f.st.UpdateMessageStatus(ctx, m.ID, store.MessageStatusDispatched); err != nil {
+	claimed, err := r.f.st.ClaimMessageForDispatch(ctx, m.ID, []string{
+		store.MessageStatusQueued,
+		store.MessageStatusWaitTimer,
+		store.MessageStatusWaitTimerEvent,
+	})
+	if err != nil {
 		slog.Error("retry: mark dispatched failed", "id", m.ID, "err", err)
+		return
+	}
+	if !claimed {
+		slog.Debug("retry: message already claimed or no longer retryable", "id", m.ID, "status", m.Status)
 		return
 	}
 
 	msg := storeToCodecMessage(m)
-	route, err := r.f.tryRoutes(ctx, msg, m.ID)
-	if err != nil {
+	result := r.retryMessage(ctx, m, msg)
+	if result.outcome != passOutcomeDelivered {
 		if r.f.m != nil {
 			r.f.m.SFRetried.Inc()
 		}
-		slog.Warn("retry: no usable route", "id", m.ID, "dst", m.DstMSISDN, "err", err)
-		r.scheduleOrFail(ctx, m, nil)
+		r.finalizeNonDelivered(ctx, m, msg, result)
 		return
 	}
+	route := result.deliveredRoute
 	slog.Info("retry: delivered", "id", m.ID, "egress", route.egressIface, "peer", route.egressPeer)
 	if err := r.f.persistDeliveredRoute(ctx, m.ID, msg.EgressInterface, route.egressPeer); err != nil {
 		slog.Error("retry: persist delivered route failed", "id", m.ID, "err", err)
@@ -72,6 +80,56 @@ func (r *RetryScheduler) dispatch(ctx context.Context, m store.Message) {
 	if r.f.reporter != nil {
 		if stored, err := r.f.st.GetMessage(ctx, m.ID); err == nil && stored != nil {
 			r.f.reporter.Report(ctx, *stored, "DELIVRD")
+		}
+	}
+}
+
+func (r *RetryScheduler) retryMessage(ctx context.Context, m store.Message, msg *codec.Message) routingPassResult {
+	if m.DeferredReason == "sgd_alert_retry" && m.DeferredInterface == string(codec.InterfaceSGd) {
+		route, err := r.f.tryRouteAt(ctx, msg, m.RouteCursor)
+		if err != nil {
+			return routingPassResult{
+				outcome:       passOutcomeWaitTimer,
+				lastAttempted: route,
+				timerRoute:    route,
+				lastErr:       err,
+			}
+		}
+		return routingPassResult{
+			outcome:        passOutcomeDelivered,
+			deliveredRoute: route,
+			lastAttempted:  route,
+		}
+	}
+	return r.f.runRoutingPass(ctx, msg, m.RouteCursor)
+}
+
+func (r *RetryScheduler) finalizeNonDelivered(ctx context.Context, m store.Message, msg *codec.Message, result routingPassResult) {
+	switch result.outcome {
+	case passOutcomeWaitTimer:
+		r.f.markDeferred(ctx, m.ID, msg, m.RouteCursor, result.lastAttempted)
+		r.f.applyDeferredExpiryCap(ctx, m.ID, m.SubmittedAt, result.lastAttempted)
+		r.scheduleOrFail(ctx, m, result.lastAttempted)
+	case passOutcomeWaitEvent:
+		r.f.markDeferred(ctx, m.ID, msg, m.RouteCursor, result.eventRoute)
+		r.f.applyDeferredExpiryCap(ctx, m.ID, m.SubmittedAt, result.eventRoute)
+		if err := r.f.st.UpdateMessageStatus(ctx, m.ID, store.MessageStatusWaitEvent); err != nil {
+			slog.Error("retry: mark wait event failed", "id", m.ID, "err", err)
+		}
+	case passOutcomeWaitTimerEvent:
+		r.f.markDeferred(ctx, m.ID, msg, m.RouteCursor, result.eventRoute)
+		r.f.applyDeferredExpiryCap(ctx, m.ID, m.SubmittedAt, result.eventRoute)
+		r.scheduleOrFail(ctx, m, result.eventRoute)
+		if err := r.f.st.UpdateMessageStatus(ctx, m.ID, store.MessageStatusWaitTimerEvent); err != nil {
+			slog.Error("retry: mark wait timer-event failed", "id", m.ID, "err", err)
+		}
+	case passOutcomeFailed:
+		slog.Warn("retry: max retries exceeded, marking failed", "id", m.ID, "err", result.lastErr)
+		_ = r.f.st.UpdateMessageStatus(ctx, m.ID, store.MessageStatusFailed)
+		if r.f.reporter != nil {
+			if stored, err := r.f.st.GetMessage(ctx, m.ID); err == nil && stored != nil {
+				r.f.reporter.Report(ctx, *stored, "FAILED")
+			}
 		}
 	}
 }
@@ -91,7 +149,7 @@ func (r *RetryScheduler) scheduleOrFail(ctx context.Context, m store.Message, ro
 		return
 	}
 
-	if err := r.f.st.UpdateMessageRetry(ctx, m.ID, m.RetryCount+1, *next, 0); err != nil {
+	if err := r.f.st.UpdateMessageRetry(ctx, m.ID, m.RetryCount+1, *next, deferredRouteCursor(route)); err != nil {
 		slog.Error("retry: update retry failed", "id", m.ID, "err", err)
 	}
 }
@@ -134,7 +192,10 @@ func (r *RetryScheduler) sfPolicyForMessage(ctx context.Context, m store.Message
 		return route.sfPolicyID
 	}
 	msg := storeToCodecMessage(m)
-	selected, err := r.f.selectRoute(ctx, msg, 0)
+	if planned := r.f.plannedRouteAt(msg, m.RouteCursor); planned != nil && planned.sfPolicyID != "" {
+		return planned.sfPolicyID
+	}
+	selected, err := r.f.selectRoute(ctx, msg, m.RouteCursor)
 	if err != nil || selected == nil {
 		return ""
 	}
@@ -148,6 +209,7 @@ func storeToCodecMessage(m store.Message) *codec.Message {
 		IngressInterface: codec.InterfaceType(m.OriginIface),
 		EgressInterface:  codec.InterfaceType(m.EgressIface),
 		IngressPeer:      m.OriginPeer,
+		CorrelationID:    m.AlertCorrelationID,
 		Encoding:         tpdu.ParseDCS(byte(m.DCS)),
 		DCS:              byte(m.DCS),
 	}
@@ -172,6 +234,9 @@ func storeToCodecMessage(m store.Message) *codec.Message {
 	if m.ExpiryAt != nil {
 		t := *m.ExpiryAt
 		msg.Expiry = &t
+		if remaining := time.Until(t); remaining > 0 {
+			msg.ValidityPeriod = &remaining
+		}
 	}
 	return msg
 }

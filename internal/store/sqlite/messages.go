@@ -11,15 +11,17 @@ import (
 
 func (db *DB) SaveMessage(ctx context.Context, msg store.Message) error {
 	const q = `
-		INSERT INTO messages (
-			id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-			egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
-			payload, udh, encoding, dcs, status, retry_count,
-			next_retry_at, dr_required, submitted_at, expiry_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+			INSERT INTO messages (
+				id, tp_mr, smpp_msgid, origin_iface, origin_peer,
+				egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+				alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
+				payload, udh, encoding, dcs, status, retry_count,
+				next_retry_at, dr_required, submitted_at, expiry_at
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 	_, err := db.db.ExecContext(ctx, q,
 		msg.ID, msg.TPMR, msg.SMPPMsgID, msg.OriginIface, msg.OriginPeer,
 		msg.EgressIface, msg.EgressPeer, msg.RouteCursor, msg.SrcMSISDN, msg.DstMSISDN,
+		msg.AlertCorrelationID, msg.DeferredReason, msg.DeferredInterface, msg.ServingNodeAtDeferral,
 		msg.Payload, msg.UDH, msg.Encoding, msg.DCS, msg.Status, msg.RetryCount,
 		nullableTime(msg.NextRetryAt),
 		boolInt(msg.DRRequired),
@@ -42,6 +44,18 @@ func (db *DB) UpdateMessageRouting(ctx context.Context, id, egressIface, egressP
 	return nil
 }
 
+func (db *DB) UpdateMessageDeferred(ctx context.Context, id, deferredReason, deferredInterface, servingNodeAtDeferral string, routeCursor int) error {
+	_, err := db.db.ExecContext(ctx,
+		`UPDATE messages
+		   SET deferred_reason=?, deferred_interface=?, serving_node_at_deferral=?, route_cursor=?
+		 WHERE id=?`,
+		deferredReason, deferredInterface, servingNodeAtDeferral, routeCursor, id)
+	if err != nil {
+		return fmt.Errorf("update message deferred %s: %w", id, err)
+	}
+	return nil
+}
+
 func (db *DB) UpdateMessageStatus(ctx context.Context, id, status string) error {
 	var err error
 	if status == store.MessageStatusDelivered {
@@ -59,10 +73,33 @@ func (db *DB) UpdateMessageStatus(ctx context.Context, id, status string) error 
 	return nil
 }
 
+func (db *DB) ClaimMessageForDispatch(ctx context.Context, id string, allowedStatuses []string) (bool, error) {
+	if len(allowedStatuses) == 0 {
+		return false, nil
+	}
+	args := make([]any, 0, len(allowedStatuses)+3)
+	args = append(args, store.MessageStatusDispatched, id)
+	placeholders := make([]string, 0, len(allowedStatuses))
+	for _, status := range allowedStatuses {
+		placeholders = append(placeholders, "?")
+		args = append(args, status)
+	}
+	q := `UPDATE messages SET status=? WHERE id=? AND status IN (` + strings.Join(placeholders, ",") + `)`
+	res, err := db.db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return false, fmt.Errorf("claim message for dispatch %s: %w", id, err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("claim message for dispatch %s: rows affected: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
 func (db *DB) UpdateMessageRetry(ctx context.Context, id string, retryCount int, nextRetryAt time.Time, routeCursor int) error {
 	_, err := db.db.ExecContext(ctx,
 		`UPDATE messages SET status=?, retry_count=?, next_retry_at=?, route_cursor=? WHERE id=?`,
-		store.MessageStatusQueued, retryCount,
+		store.MessageStatusWaitTimer, retryCount,
 		nextRetryAt.UTC().Format(time.RFC3339), routeCursor, id)
 	if err != nil {
 		return fmt.Errorf("update message retry %s: %w", id, err)
@@ -70,36 +107,92 @@ func (db *DB) UpdateMessageRetry(ctx context.Context, id string, retryCount int,
 	return nil
 }
 
+func (db *DB) UpdateMessageExpiryCap(ctx context.Context, id string, expiryAt time.Time) error {
+	_, err := db.db.ExecContext(ctx,
+		`UPDATE messages
+		    SET expiry_at = CASE
+		        WHEN expiry_at IS NULL OR expiry_at > ? THEN ?
+		        ELSE expiry_at
+		    END
+		  WHERE id=?`,
+		expiryAt.UTC().Format(time.RFC3339),
+		expiryAt.UTC().Format(time.RFC3339),
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("update message expiry cap %s: %w", id, err)
+	}
+	return nil
+}
+
+func (db *DB) RequeueMessageForAlert(ctx context.Context, id string, nextRetryAt time.Time, routeCursor int, deferredReason string, allowedStatuses []string) (bool, error) {
+	if len(allowedStatuses) == 0 {
+		return false, nil
+	}
+	args := make([]any, 0, len(allowedStatuses)+7)
+	args = append(args,
+		store.MessageStatusWaitTimer,
+		nextRetryAt.UTC().Format(time.RFC3339),
+		routeCursor,
+		deferredReason,
+		deferredReason,
+		id,
+	)
+	placeholders := make([]string, 0, len(allowedStatuses))
+	for _, status := range allowedStatuses {
+		placeholders = append(placeholders, "?")
+		args = append(args, status)
+	}
+	q := `UPDATE messages
+		SET status=?, next_retry_at=?, route_cursor=?,
+		    deferred_reason=CASE WHEN ? <> '' THEN ? ELSE deferred_reason END
+		WHERE id=? AND status IN (` + strings.Join(placeholders, ",") + `)`
+	res, err := db.db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return false, fmt.Errorf("requeue message for alert %s: %w", id, err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("requeue message for alert %s: rows affected: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
 func (db *DB) ListRetryableMessages(ctx context.Context) ([]store.Message, error) {
 	const q = `
-		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
-		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-		       dr_required, submitted_at, expiry_at
+			SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
+			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
+			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
+			       dr_required, submitted_at, expiry_at
 		FROM messages
-		WHERE status='QUEUED' AND (next_retry_at IS NULL OR next_retry_at <= datetime('now'))
+		WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_TIMER_EVENT')
+		  AND (next_retry_at IS NULL OR next_retry_at <= datetime('now'))
 		ORDER BY next_retry_at ASC LIMIT 100`
 	return sqliteScanMessages(db, ctx, q)
 }
 
 func (db *DB) ListExpiredMessages(ctx context.Context) ([]store.Message, error) {
 	const q = `
-		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
-		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-		       dr_required, submitted_at, expiry_at
+			SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
+			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
+			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
+			       dr_required, submitted_at, expiry_at
 		FROM messages
-		WHERE status='QUEUED' AND expiry_at IS NOT NULL AND expiry_at <= datetime('now')
+		WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_EVENT','WAIT_TIMER_EVENT')
+		  AND expiry_at IS NOT NULL AND expiry_at <= datetime('now')
 		LIMIT 100`
 	return sqliteScanMessages(db, ctx, q)
 }
 
 func (db *DB) GetMessage(ctx context.Context, id string) (*store.Message, error) {
 	const q = `
-		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
-		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-	       dr_required, submitted_at, expiry_at
+			SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
+			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
+			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
+		       dr_required, submitted_at, expiry_at
 		FROM messages WHERE id=?`
 	msgs, err := sqliteScanMessages(db, ctx, q, id)
 	if err != nil {
@@ -138,6 +231,7 @@ func sqliteScanMessages(db *DB, ctx context.Context, q string, args ...any) ([]s
 		err := rows.Scan(
 			&m.ID, &tpmr, &m.SMPPMsgID, &m.OriginIface, &m.OriginPeer,
 			&m.EgressIface, &m.EgressPeer, &m.RouteCursor, &m.SrcMSISDN, &m.DstMSISDN,
+			&m.AlertCorrelationID, &m.DeferredReason, &m.DeferredInterface, &m.ServingNodeAtDeferral,
 			&m.Payload, &m.UDH, &encoding, &dcs, &m.Status,
 			&m.RetryCount, &nextRetryStr,
 			&drInt, &submittedStr, &expiryStr,
@@ -193,10 +287,11 @@ func (db *DB) ListMessages(ctx context.Context, limit int) ([]store.Message, err
 		limit = 100
 	}
 	const q = `
-		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
-		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-		       dr_required, submitted_at, expiry_at
+			SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
+			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
+			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
+			       dr_required, submitted_at, expiry_at
 	FROM messages ORDER BY submitted_at DESC LIMIT ?`
 	return sqliteScanMessages(db, ctx, q, limit)
 }
@@ -235,12 +330,21 @@ func (db *DB) ListFilteredMessages(ctx context.Context, filter store.MessageFilt
 		conds = append(conds, "origin_peer LIKE ?")
 		args = append(args, "%"+filter.OriginPeer+"%")
 	}
+	if filter.AlertCorrelationID != "" {
+		conds = append(conds, "alert_correlation_id = ?")
+		args = append(args, filter.AlertCorrelationID)
+	}
+	if filter.DeferredInterface != "" {
+		conds = append(conds, "deferred_interface = ?")
+		args = append(args, filter.DeferredInterface)
+	}
 
 	q := `
-		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
-		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-		       dr_required, submitted_at, expiry_at
+			SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
+			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
+			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
+			       dr_required, submitted_at, expiry_at
 		FROM messages`
 	if len(conds) > 0 {
 		q += "\n\t\tWHERE " + strings.Join(conds, " AND ")

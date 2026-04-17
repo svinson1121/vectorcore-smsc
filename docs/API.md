@@ -288,6 +288,13 @@ curl -s -X POST http://localhost:8080/api/v1/diameter/peers \
 - `PUT /api/v1/routing/rules/{id}`
 - `DELETE /api/v1/routing/rules/{id}`
 
+Notes:
+
+- routing rules are fallback-only
+- valid `egress_iface` values are `smpp` and `sipsimple`
+- `sgd` is built in and can no longer be created as a routing rule
+- legacy `sgd` routing rules are removed during startup cleanup
+
 List sample response:
 
 ```json
@@ -365,6 +372,13 @@ curl -s -X POST http://localhost:8080/api/v1/routing/policies \
     "vp_override": ""
   }'
 ```
+
+Policy semantics:
+
+- `max_ttl` caps queued/waiting lifetime for messages that use that policy
+- if no policy is attached, the SMSC uses the global `smsc.max_queue_lifetime`
+- `vp_override` is currently future-capable for full wire-level validity handling; today it is used as an internal validity/lifetime hint, not a guaranteed on-the-wire validity field across all MT routes
+- `vp_override` also acts as an earlier expiry cap if it is shorter than the applicable queue lifetime cap
 
 ## Subscribers
 

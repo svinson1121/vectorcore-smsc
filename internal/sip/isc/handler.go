@@ -25,9 +25,9 @@ type MessageHandler struct {
 	// OnResult is called for inbound RP-ACK / RP-ERROR carrying the body linked
 	// by In-Reply-To to a previously sent MESSAGE.
 	OnResult func(inReplyTo string, body []byte)
-	Client    *sipgo.Client
-	SIPLocal  string
-	Settings  Settings
+	Client   *sipgo.Client
+	SIPLocal string
+	Settings Settings
 }
 
 // Handle is the sipgo request handler for SIP MESSAGE on the ISC interface.
@@ -87,18 +87,22 @@ func (h *MessageHandler) Handle(req *sip.Request, tx sip.ServerTransaction) {
 		"peer", msg.IngressPeer,
 	)
 
-	if h.OnMessage != nil {
-		h.OnMessage(msg)
-	}
-
 	respond(tx, req, sip.StatusOK, "OK")
 
-	// For MO submit over IMS the originating UE expects a separate MESSAGE
-	// carrying RP-ACK/RP-ERROR, linked by In-Reply-To to the original submit.
+	// For store-and-forward MO handling we acknowledge the SIP transaction
+	// immediately, then continue routing and RP-ACK generation asynchronously.
 	if h.Client != nil {
-		if err := h.sendSubmitReport(context.Background(), req, msg.RPMR); err != nil {
-			slog.Warn("ISC submit report send failed", "err", err, "src", msg.Source.MSISDN)
-		}
+		go func(msg *codec.Message) {
+			// The originating UE expects a separate MESSAGE carrying RP-ACK/RP-ERROR,
+			// linked by In-Reply-To to the original submit.
+			if err := h.sendSubmitReport(context.Background(), req, msg.RPMR); err != nil {
+				slog.Warn("ISC submit report send failed", "err", err, "src", msg.Source.MSISDN)
+			}
+		}(msg)
+	}
+
+	if h.OnMessage != nil {
+		go h.OnMessage(msg)
 	}
 }
 

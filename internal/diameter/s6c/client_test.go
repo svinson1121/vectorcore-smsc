@@ -1,7 +1,9 @@
 package s6c
 
 import (
+	"encoding/base64"
 	"testing"
+	"time"
 
 	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
 )
@@ -151,5 +153,109 @@ func TestParseSRIAnswerUnattachedSubscriber(t *testing.T) {
 	}
 	if got, want := info.MWDStatus, dcodec.MWDStatusMNRF; got != want {
 		t.Fatalf("MWDStatus = %d, want %d", got, want)
+	}
+}
+
+func TestParseAlertServiceCentreUsesUserIdentifierAndCorrelation(t *testing.T) {
+	userIdentifier, err := dcodec.NewGrouped(
+		dcodec.CodeUserIdentifier,
+		dcodec.Vendor3GPP,
+		dcodec.FlagMandatory|dcodec.FlagVendorSpecific,
+		[]*dcodec.AVP{
+			dcodec.NewString(dcodec.CodeUserName, 0, dcodec.FlagMandatory, "311435000070570"),
+			dcodec.NewOctetString(dcodec.CodeMSISDN, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, encodeTBCD("3342012832")),
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewGrouped() error = %v", err)
+	}
+	servingNode, err := dcodec.NewGrouped(
+		dcodec.CodeServingNode,
+		dcodec.Vendor3GPP,
+		dcodec.FlagMandatory|dcodec.FlagVendorSpecific,
+		[]*dcodec.AVP{
+			dcodec.NewString(dcodec.CodeMMEName, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, "mme01.example.net"),
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewGrouped() error = %v", err)
+	}
+	corrPayload := []byte("smsc:message-123")
+	msg := &dcodec.Message{
+		Header: dcodec.Header{
+			CommandCode: dcodec.CmdAlertServiceCentre,
+			AppID:       dcodec.App3GPP_S6c,
+		},
+		AVPs: []*dcodec.AVP{
+			dcodec.NewString(dcodec.CodeSessionID, 0, dcodec.FlagMandatory, "smsc.example;123;4"),
+			dcodec.NewString(dcodec.CodeOriginHost, 0, dcodec.FlagMandatory, "hss.example.net"),
+			dcodec.NewString(dcodec.CodeOriginRealm, 0, dcodec.FlagMandatory, "example.net"),
+			dcodec.NewOctetString(dcodec.CodeSCAddressS6c, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, encodeTBCD("15550000000")),
+			userIdentifier,
+			dcodec.NewOctetString(dcodec.CodeSMSMICorrelationID, dcodec.Vendor3GPP, dcodec.FlagVendorSpecific, corrPayload),
+			servingNode,
+			dcodec.NewUint32(dcodec.CodeSMSGMSCAlertEvent, dcodec.Vendor3GPP, dcodec.FlagVendorSpecific, 1),
+		},
+	}
+
+	req, err := parseAlertServiceCentre(msg)
+	if err != nil {
+		t.Fatalf("parseAlertServiceCentre() error = %v", err)
+	}
+	if got, want := req.IMSI, "311435000070570"; got != want {
+		t.Fatalf("IMSI = %q, want %q", got, want)
+	}
+	if got, want := req.MSISDN, "3342012832"; got != want {
+		t.Fatalf("MSISDN = %q, want %q", got, want)
+	}
+	if got, want := req.AlertCorrelationID, base64.StdEncoding.EncodeToString(corrPayload); got != want {
+		t.Fatalf("AlertCorrelationID = %q, want %q", got, want)
+	}
+	if got, want := req.ServingNode, "mme01.example.net"; got != want {
+		t.Fatalf("ServingNode = %q, want %q", got, want)
+	}
+}
+
+func TestBuildUserIdentifierIncludesBothIMSIAndMSISDN(t *testing.T) {
+	uid := buildUserIdentifier("311435000070570", "3342012832")
+	if uid == nil {
+		t.Fatal("buildUserIdentifier() = nil")
+	}
+	children, err := dcodec.DecodeGrouped(uid)
+	if err != nil {
+		t.Fatalf("DecodeGrouped() error = %v", err)
+	}
+	if len(children) != 2 {
+		t.Fatalf("len(children) = %d, want 2", len(children))
+	}
+}
+
+func TestDecodeAlertCorrelationIDRoundTrip(t *testing.T) {
+	raw := []byte("smsc:message-123")
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	got, err := decodeAlertCorrelationID(encoded)
+	if err != nil {
+		t.Fatalf("decodeAlertCorrelationID() error = %v", err)
+	}
+	if string(got) != string(raw) {
+		t.Fatalf("decodeAlertCorrelationID() = %q, want %q", got, raw)
+	}
+}
+
+func TestParseAlertServiceCentreMaximumUEAvailabilityTimeOptional(t *testing.T) {
+	ts := uint32(time.Now().Unix() + 2208988800)
+	msg := &dcodec.Message{
+		Header: dcodec.Header{CommandCode: dcodec.CmdAlertServiceCentre, AppID: dcodec.App3GPP_S6c},
+		AVPs: []*dcodec.AVP{
+			dcodec.NewString(dcodec.CodeSessionID, 0, dcodec.FlagMandatory, "smsc.example;123;5"),
+			dcodec.NewUint32(dcodec.CodeMaximumUEAvailabilityTime, dcodec.Vendor3GPP, dcodec.FlagVendorSpecific, ts),
+		},
+	}
+	req, err := parseAlertServiceCentre(msg)
+	if err != nil {
+		t.Fatalf("parseAlertServiceCentre() error = %v", err)
+	}
+	if req.MaximumUEAvailabilityTime == nil {
+		t.Fatal("MaximumUEAvailabilityTime = nil, want value")
 	}
 }

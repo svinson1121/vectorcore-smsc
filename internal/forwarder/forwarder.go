@@ -6,6 +6,8 @@ package forwarder
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -13,6 +15,8 @@ import (
 
 	"github.com/svinson1121/vectorcore-smsc/internal/codec"
 	smppcodec "github.com/svinson1121/vectorcore-smsc/internal/codec/smpp"
+	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
+	diametersgd "github.com/svinson1121/vectorcore-smsc/internal/diameter/sgd"
 	"github.com/svinson1121/vectorcore-smsc/internal/metrics"
 	"github.com/svinson1121/vectorcore-smsc/internal/registry"
 	"github.com/svinson1121/vectorcore-smsc/internal/routing"
@@ -54,14 +58,44 @@ type selectedRoute struct {
 	priority    int
 }
 
+type routeOutcome int
+
+const (
+	routeOutcomeDelivered routeOutcome = iota
+	routeOutcomeTryNext
+	routeOutcomeWaitTimer
+	routeOutcomeWaitEvent
+	routeOutcomePermanent
+)
+
+type passOutcome int
+
+const (
+	passOutcomeDelivered passOutcome = iota
+	passOutcomeWaitTimer
+	passOutcomeWaitEvent
+	passOutcomeWaitTimerEvent
+	passOutcomeFailed
+)
+
+type routingPassResult struct {
+	outcome        passOutcome
+	deliveredRoute *selectedRoute
+	lastAttempted  *selectedRoute
+	eventRoute     *selectedRoute
+	timerRoute     *selectedRoute
+	lastErr        error
+}
+
 // Forwarder dispatches messages to the correct egress interface.
 type Forwarder struct {
-	reg       *registry.Registry
-	engine    *routing.Engine
-	st        store.Store
-	scAddr    string // Our SMSC address for RP-OA / SGd SC-Address
-	m         *metrics.M
-	sgdMapper *sgdmap.Mapper // optional; nil = no MME name translation
+	reg              *registry.Registry
+	engine           *routing.Engine
+	st               store.Store
+	scAddr           string // Our SMSC address for RP-OA / SGd SC-Address
+	m                *metrics.M
+	sgdMapper        *sgdmap.Mapper // optional; nil = no MME name translation
+	maxQueueLifetime time.Duration
 
 	// Egress senders — all optional; nil means that interface is not available.
 	iscSender    ISCSender
@@ -73,114 +107,206 @@ type Forwarder struct {
 
 // Config holds the dependencies wired into the Forwarder.
 type Config struct {
-	Registry     *registry.Registry
-	Engine       *routing.Engine
-	Store        store.Store
-	SCAddr       string
-	Metrics      *metrics.M
-	ISCSender    ISCSender
-	SimpleSender SimpleSender
-	SMPPManager  *smppClient.Manager
-	SGdSender    SGdSender
-	Reporter     DeliveryReporter
-	SGDMapper    *sgdmap.Mapper // optional S6c→SGd MME name translator
+	Registry         *registry.Registry
+	Engine           *routing.Engine
+	Store            store.Store
+	SCAddr           string
+	Metrics          *metrics.M
+	ISCSender        ISCSender
+	SimpleSender     SimpleSender
+	SMPPManager      *smppClient.Manager
+	SGdSender        SGdSender
+	Reporter         DeliveryReporter
+	SGDMapper        *sgdmap.Mapper // optional S6c→SGd MME name translator
+	MaxQueueLifetime time.Duration
 }
 
 // New creates a Forwarder.
 func New(cfg Config) *Forwarder {
 	return &Forwarder{
-		reg:          cfg.Registry,
-		engine:       cfg.Engine,
-		st:           cfg.Store,
-		scAddr:       cfg.SCAddr,
-		m:            cfg.Metrics,
-		sgdMapper:    cfg.SGDMapper,
-		iscSender:    cfg.ISCSender,
-		simpleSender: cfg.SimpleSender,
-		smppMgr:      cfg.SMPPManager,
-		sgdSender:    cfg.SGdSender,
-		reporter:     cfg.Reporter,
+		reg:              cfg.Registry,
+		engine:           cfg.Engine,
+		st:               cfg.Store,
+		scAddr:           cfg.SCAddr,
+		m:                cfg.Metrics,
+		sgdMapper:        cfg.SGDMapper,
+		maxQueueLifetime: cfg.MaxQueueLifetime,
+		iscSender:        cfg.ISCSender,
+		simpleSender:     cfg.SimpleSender,
+		smppMgr:          cfg.SMPPManager,
+		sgdSender:        cfg.SGdSender,
+		reporter:         cfg.Reporter,
 	}
 }
 
 // Dispatch routes msg to the correct egress interface.
 // Every message is written to the database before the network send, so a crash
 // between receipt and delivery leaves the message in QUEUED state for retry.
-// On success the record is updated to DELIVERED; on failure the retry scheduler
-// picks it up based on next_retry_at.
+// On success the record is updated to DELIVERED; on non-terminal outcomes the
+// message moves into one of the waiting states and is later resumed by the
+// retry scheduler or alert-triggered wakeup path.
 func (f *Forwarder) Dispatch(ctx context.Context, msg *codec.Message) {
 	if msg.ID == "" {
 		msg.ID = newUUID()
+	}
+	if msg.CorrelationID == "" {
+		msg.CorrelationID = defaultAlertCorrelationID(msg.ID)
 	}
 	if f.m != nil {
 		f.m.MessagesIn.WithLabelValues(string(msg.IngressInterface)).Inc()
 	}
 
 	now := time.Now()
-	f.persistMessage(ctx, msg, "", "", store.MessageStatusQueued, now)
-	if err := f.st.UpdateMessageStatus(ctx, msg.ID, store.MessageStatusDispatched); err != nil {
-		slog.Error("forwarder: mark dispatched failed", "id", msg.ID, "err", err)
-		// Continue — we'll still attempt delivery; worst case the retry
-		// scheduler also attempts it (double-deliver is safer than losing it).
+	f.persistMessage(ctx, msg, "", "", store.MessageStatusDispatched, now)
+
+	result := f.runRoutingPass(ctx, msg, 0)
+	f.finalizeRoutingPass(ctx, msg, now, 0, 1, result, "forwarder")
+}
+
+func (f *Forwarder) tryRoutes(ctx context.Context, msg *codec.Message, startCursor int) (*selectedRoute, *selectedRoute, error) {
+	result := f.runRoutingPass(ctx, msg, startCursor)
+	if result.outcome == passOutcomeDelivered {
+		return result.deliveredRoute, result.deliveredRoute, nil
+	}
+	if result.lastErr != nil {
+		return nil, result.lastAttempted, result.lastErr
+	}
+	return nil, result.lastAttempted, fmt.Errorf("routing pass ended with outcome %d", result.outcome)
+}
+
+func (f *Forwarder) runRoutingPass(ctx context.Context, msg *codec.Message, startCursor int) routingPassResult {
+	totalCandidates := f.candidateCount(msg)
+	if totalCandidates <= 0 {
+		return routingPassResult{outcome: passOutcomeWaitTimer}
 	}
 
-	route, err := f.tryRoutes(ctx, msg, msg.ID)
-	if err != nil {
-		slog.Warn("forwarder: no usable route",
-			"dst", msg.Destination.MSISDN,
-			"src_iface", msg.IngressInterface,
-			"err", err,
-		)
-		next := now.Add(30 * time.Second)
-		if err := f.st.UpdateMessageRetry(ctx, msg.ID, 1, next, 0); err != nil {
-			slog.Error("forwarder: schedule retry failed", "id", msg.ID, "err", err)
+	decisions := f.fallbackDecisions(msg)
+	base := modulo(startCursor, totalCandidates)
+	var sawRetry bool
+	var sawPermanent bool
+	var lastErr error
+	var lastAttempted *selectedRoute
+
+	for offset := 0; offset < totalCandidates; offset++ {
+		routeIndex := (base + offset) % totalCandidates
+		route, reason := f.resolveCandidateAt(ctx, msg, decisions, routeIndex)
+		if reason != "" {
+			slog.Debug("forwarder: routing candidate skipped",
+				"dst", msg.Destination.MSISDN,
+				"route_index", routeIndex,
+				"reason", reason,
+			)
+			if planned := f.plannedRouteAt(msg, routeIndex); planned != nil {
+				lastAttempted = planned
+				lastErr = errors.New(reason)
+			}
+			sawRetry = true
+			continue
 		}
-		return
+
+		slog.Debug("forwarder: routing candidate selected",
+			"dst", msg.Destination.MSISDN,
+			"route_index", route.routeIndex,
+			"rule", route.ruleName,
+			"priority", route.priority,
+			"egress", route.egressIface,
+			"peer", route.egressPeer,
+		)
+
+		outcome, err := f.attemptRoute(ctx, msg, route)
+		switch outcome {
+		case routeOutcomeDelivered:
+			return routingPassResult{
+				outcome:        passOutcomeDelivered,
+				deliveredRoute: route,
+				lastAttempted:  route,
+			}
+		case routeOutcomeWaitEvent:
+			pass := passOutcomeWaitEvent
+			if sawRetry || sawPermanent {
+				pass = passOutcomeWaitTimerEvent
+			}
+			return routingPassResult{
+				outcome:       pass,
+				eventRoute:    route,
+				lastAttempted: route,
+				lastErr:       err,
+			}
+		case routeOutcomeWaitTimer:
+			sawRetry = true
+			lastAttempted = route
+			lastErr = err
+		case routeOutcomePermanent:
+			sawPermanent = true
+			lastAttempted = route
+			lastErr = err
+		case routeOutcomeTryNext:
+			sawRetry = true
+			lastAttempted = route
+			lastErr = err
+		}
 	}
 
-	if err := f.persistDeliveredRoute(ctx, msg.ID, msg.EgressInterface, route.egressPeer); err != nil {
-		slog.Error("forwarder: persist delivered route failed", "id", msg.ID, "err", err)
-	}
-	_ = f.st.UpdateMessageStatus(ctx, msg.ID, store.MessageStatusDelivered)
-	if f.reporter != nil {
-		if stored, err := f.st.GetMessage(ctx, msg.ID); err == nil && stored != nil {
-			f.reporter.Report(ctx, *stored, "DELIVRD")
+	switch {
+	case sawRetry:
+		return routingPassResult{
+			outcome:       passOutcomeWaitTimer,
+			timerRoute:    lastAttempted,
+			lastAttempted: lastAttempted,
+			lastErr:       lastErr,
+		}
+	case sawPermanent:
+		return routingPassResult{
+			outcome:       passOutcomeFailed,
+			lastAttempted: lastAttempted,
+			lastErr:       lastErr,
+		}
+	default:
+		return routingPassResult{
+			outcome: passOutcomeFailed,
+			lastErr: fmt.Errorf("no usable route for dst=%s", msg.Destination.MSISDN),
 		}
 	}
 }
 
-func (f *Forwarder) tryRoutes(ctx context.Context, msg *codec.Message, messageID string) (*selectedRoute, error) {
-	totalCandidates := f.candidateCount(msg)
-	var lastErr error
-
-	for cursor := 0; cursor < totalCandidates; {
-		route, err := f.selectRoute(ctx, msg, cursor)
-		if err != nil {
-			if lastErr != nil {
-				return nil, lastErr
-			}
-			return nil, err
-		}
-		msg.EgressInterface = codec.InterfaceType(route.egressIface)
-		if err := f.deliverSelectedRoute(ctx, msg, route); err == nil {
-			return route, nil
-		} else {
-			lastErr = err
-			slog.Warn("forwarder: candidate delivery failed",
-				"dst", msg.Destination.MSISDN,
-				"route_index", route.routeIndex,
-				"egress", route.egressIface,
-				"peer", route.egressPeer,
-				"err", err,
-			)
-		}
-		cursor = route.nextRouteCursor()
+func (f *Forwarder) attemptRoute(ctx context.Context, msg *codec.Message, route *selectedRoute) (routeOutcome, error) {
+	msg.EgressInterface = codec.InterfaceType(route.egressIface)
+	restore := f.applyRoutePolicy(ctx, msg, route)
+	defer restore()
+	if err := f.deliverSelectedRoute(ctx, msg, route); err != nil {
+		outcome := classifyRouteError(route, err)
+		slog.Warn("forwarder: candidate delivery failed",
+			"dst", msg.Destination.MSISDN,
+			"route_index", route.routeIndex,
+			"egress", route.egressIface,
+			"peer", route.egressPeer,
+			"outcome", outcome,
+			"err", err,
+		)
+		return outcome, err
 	}
+	return routeOutcomeDelivered, nil
+}
 
-	if lastErr != nil {
-		return nil, lastErr
+func (f *Forwarder) tryRouteAt(ctx context.Context, msg *codec.Message, routeCursor int) (*selectedRoute, error) {
+	decisions := f.fallbackDecisions(msg)
+	totalCandidates := len(decisions) + 3
+	if totalCandidates == 0 {
+		return nil, fmt.Errorf("no usable route for dst=%s", msg.Destination.MSISDN)
 	}
-	return nil, fmt.Errorf("no usable route for dst=%s", msg.Destination.MSISDN)
+	routeIndex := modulo(routeCursor, totalCandidates)
+	route, reason := f.resolveCandidateAt(ctx, msg, decisions, routeIndex)
+	if reason != "" || route == nil {
+		if reason == "" {
+			reason = "candidate unavailable"
+		}
+		return nil, fmt.Errorf("route[%d] unavailable: %s", routeIndex, reason)
+	}
+	msg.EgressInterface = codec.InterfaceType(route.egressIface)
+	if err := f.deliverSelectedRoute(ctx, msg, route); err != nil {
+		return route, err
+	}
+	return route, nil
 }
 
 func (f *Forwarder) persistDeliveredRoute(ctx context.Context, messageID string, egress codec.InterfaceType, peer string) error {
@@ -188,6 +314,172 @@ func (f *Forwarder) persistDeliveredRoute(ctx context.Context, messageID string,
 		return nil
 	}
 	return f.st.UpdateMessageRouting(ctx, messageID, string(egress), peer)
+}
+
+func (f *Forwarder) finalizeRoutingPass(ctx context.Context, msg *codec.Message, now time.Time, startCursor, nextRetryCount int, result routingPassResult, logPrefix string) {
+	switch result.outcome {
+	case passOutcomeDelivered:
+		route := result.deliveredRoute
+		if route == nil {
+			route = result.lastAttempted
+		}
+		if route != nil {
+			if err := f.persistDeliveredRoute(ctx, msg.ID, msg.EgressInterface, route.egressPeer); err != nil {
+				slog.Error(logPrefix+": persist delivered route failed", "id", msg.ID, "err", err)
+			}
+		}
+		_ = f.st.UpdateMessageStatus(ctx, msg.ID, store.MessageStatusDelivered)
+		if f.reporter != nil {
+			if stored, err := f.st.GetMessage(ctx, msg.ID); err == nil && stored != nil {
+				f.reporter.Report(ctx, *stored, "DELIVRD")
+			}
+		}
+	case passOutcomeWaitTimer:
+		slog.Warn(logPrefix+": no usable route",
+			"dst", msg.Destination.MSISDN,
+			"src_iface", msg.IngressInterface,
+			"err", result.lastErr,
+		)
+		f.markDeferred(ctx, msg.ID, msg, startCursor, result.lastAttempted)
+		f.applyDeferredExpiryCap(ctx, msg.ID, now, result.lastAttempted)
+		next := now.Add(30 * time.Second)
+		routeCursor := deferredRouteCursor(result.lastAttempted)
+		if err := f.st.UpdateMessageRetry(ctx, msg.ID, nextRetryCount, next, routeCursor); err != nil {
+			slog.Error(logPrefix+": schedule retry failed", "id", msg.ID, "err", err)
+		}
+	case passOutcomeWaitEvent:
+		f.markDeferred(ctx, msg.ID, msg, startCursor, result.eventRoute)
+		f.applyDeferredExpiryCap(ctx, msg.ID, now, result.eventRoute)
+		if err := f.st.UpdateMessageStatus(ctx, msg.ID, store.MessageStatusWaitEvent); err != nil {
+			slog.Error(logPrefix+": mark wait event failed", "id", msg.ID, "err", err)
+		}
+	case passOutcomeWaitTimerEvent:
+		f.markDeferred(ctx, msg.ID, msg, startCursor, result.eventRoute)
+		f.applyDeferredExpiryCap(ctx, msg.ID, now, result.eventRoute)
+		next := now.Add(30 * time.Second)
+		routeCursor := deferredRouteCursor(result.eventRoute)
+		if err := f.st.UpdateMessageRetry(ctx, msg.ID, nextRetryCount, next, routeCursor); err != nil {
+			slog.Error(logPrefix+": schedule timer-event retry failed", "id", msg.ID, "err", err)
+			return
+		}
+		if err := f.st.UpdateMessageStatus(ctx, msg.ID, store.MessageStatusWaitTimerEvent); err != nil {
+			slog.Error(logPrefix+": mark wait timer-event failed", "id", msg.ID, "err", err)
+		}
+	case passOutcomeFailed:
+		slog.Warn(logPrefix+": routing failed permanently",
+			"dst", msg.Destination.MSISDN,
+			"src_iface", msg.IngressInterface,
+			"err", result.lastErr,
+		)
+		_ = f.st.UpdateMessageStatus(ctx, msg.ID, store.MessageStatusFailed)
+		if f.reporter != nil {
+			if stored, err := f.st.GetMessage(ctx, msg.ID); err == nil && stored != nil {
+				f.reporter.Report(ctx, *stored, "FAILED")
+			}
+		}
+	}
+}
+
+func (f *Forwarder) deferredLifetimeForRoute(ctx context.Context, route *selectedRoute) time.Duration {
+	lifetime := f.maxQueueLifetime
+	pol := f.routePolicy(ctx, route)
+	if pol != nil && pol.MaxTTL > 0 {
+		return pol.MaxTTL
+	}
+	return lifetime
+}
+
+func (f *Forwarder) applyDeferredExpiryCap(ctx context.Context, messageID string, submittedAt time.Time, route *selectedRoute) {
+	if messageID == "" {
+		return
+	}
+	var expiryAt *time.Time
+	if lifetime := f.deferredLifetimeForRoute(ctx, route); lifetime > 0 {
+		t := submittedAt.Add(lifetime)
+		expiryAt = &t
+	}
+	if pol := f.routePolicy(ctx, route); pol != nil && pol.VPOverride != nil && *pol.VPOverride > 0 {
+		t := submittedAt.Add(*pol.VPOverride)
+		if expiryAt == nil || t.Before(*expiryAt) {
+			expiryAt = &t
+		}
+	}
+	if expiryAt == nil {
+		return
+	}
+	if err := f.st.UpdateMessageExpiryCap(ctx, messageID, *expiryAt); err != nil {
+		slog.Warn("forwarder: update expiry cap failed", "id", messageID, "err", err)
+	}
+}
+
+func (f *Forwarder) routePolicy(ctx context.Context, route *selectedRoute) *store.SFPolicy {
+	if route == nil || route.sfPolicyID == "" {
+		return nil
+	}
+	pol, err := f.st.GetSFPolicy(ctx, route.sfPolicyID)
+	if err != nil || pol == nil {
+		return nil
+	}
+	return pol
+}
+
+func (f *Forwarder) applyRoutePolicy(ctx context.Context, msg *codec.Message, route *selectedRoute) func() {
+	pol := f.routePolicy(ctx, route)
+	if pol == nil || pol.VPOverride == nil {
+		return func() {}
+	}
+	original := msg.ValidityPeriod
+	override := *pol.VPOverride
+	msg.ValidityPeriod = &override
+	return func() {
+		msg.ValidityPeriod = original
+	}
+}
+
+func (f *Forwarder) plannedRouteAt(msg *codec.Message, startCursor int) *selectedRoute {
+	decisions := f.fallbackDecisions(msg)
+	totalCandidates := len(decisions) + 3
+	if totalCandidates == 0 {
+		return nil
+	}
+	routeIndex := modulo(startCursor, totalCandidates)
+	switch {
+	case routeIndex == 0:
+		return &selectedRoute{
+			routeIndex:  routeIndex,
+			egressIface: string(codec.InterfaceSIP3GPP),
+			ruleName:    "ims-local",
+			priority:    -2,
+		}
+	case routeIndex == 1:
+		return &selectedRoute{
+			routeIndex:  routeIndex,
+			egressIface: string(codec.InterfaceSIP3GPP),
+			ruleName:    "ims-sh",
+			priority:    -1,
+		}
+	case routeIndex == 2:
+		return &selectedRoute{
+			routeIndex:  routeIndex,
+			egressIface: string(codec.InterfaceSGd),
+			ruleName:    "sgd-built-in",
+			priority:    0,
+		}
+	default:
+		decisionIdx := routeIndex - 3
+		if decisionIdx < 0 || decisionIdx >= len(decisions) {
+			return nil
+		}
+		decision := decisions[decisionIdx]
+		return &selectedRoute{
+			routeIndex:  routeIndex,
+			egressIface: decision.EgressIface,
+			egressPeer:  decision.EgressPeer,
+			sfPolicyID:  decision.SFPolicyID,
+			ruleName:    decision.RuleName,
+			priority:    decision.Priority,
+		}
+	}
 }
 
 func (f *Forwarder) deliverSelectedRoute(ctx context.Context, msg *codec.Message, route *selectedRoute) error {
@@ -212,22 +504,12 @@ func (f *Forwarder) deliverSelectedRoute(ctx context.Context, msg *codec.Message
 }
 
 func (f *Forwarder) candidateCount(msg *codec.Message) int {
-	decisions, err := f.engine.RouteAll(msg)
-	if err != nil {
-		return 2
-	}
-	return len(decisions) + 2
+	return len(f.fallbackDecisions(msg)) + 3
 }
 
 func (f *Forwarder) selectRoute(ctx context.Context, msg *codec.Message, startCursor int) (*selectedRoute, error) {
-	decisions, err := f.engine.RouteAll(msg)
-	if err != nil {
-		decisions = nil
-	}
-	totalCandidates := len(decisions) + 2
-	if totalCandidates == 0 {
-		return nil, err
-	}
+	decisions := f.fallbackDecisions(msg)
+	totalCandidates := len(decisions) + 3
 	slog.Debug("forwarder: routing candidates matched",
 		"dst", msg.Destination.MSISDN,
 		"count", len(decisions),
@@ -299,8 +581,14 @@ func (f *Forwarder) resolveCandidateAt(ctx context.Context, msg *codec.Message, 
 			ruleName:    "ims-sh",
 			priority:    -1,
 		}, ""
+	case routeIndex == 2:
+		return f.resolveCandidate(ctx, msg, routing.Decision{
+			RuleName:    "sgd-built-in",
+			Priority:    0,
+			EgressIface: string(codec.InterfaceSGd),
+		}, routeIndex)
 	default:
-		decisionIdx := routeIndex - 2
+		decisionIdx := routeIndex - 3
 		if decisionIdx < 0 || decisionIdx >= len(decisions) {
 			return nil, "no routing rule at index"
 		}
@@ -315,6 +603,21 @@ func (f *Forwarder) resolveCandidateAt(ctx context.Context, msg *codec.Message, 
 		)
 		return f.resolveCandidate(ctx, msg, decision, routeIndex)
 	}
+}
+
+func (f *Forwarder) fallbackDecisions(msg *codec.Message) []routing.Decision {
+	decisions, err := f.engine.RouteAll(msg)
+	if err != nil {
+		return nil
+	}
+	filtered := make([]routing.Decision, 0, len(decisions))
+	for _, decision := range decisions {
+		switch decision.EgressIface {
+		case string(codec.InterfaceSMPP), string(codec.InterfaceSIPSimple):
+			filtered = append(filtered, decision)
+		}
+	}
+	return filtered
 }
 
 func (f *Forwarder) resolveCandidate(ctx context.Context, msg *codec.Message, decision routing.Decision, routeIndex int) (*selectedRoute, string) {
@@ -393,6 +696,43 @@ func (f *Forwarder) resolveCandidate(ctx context.Context, msg *codec.Message, de
 	}
 }
 
+func classifyRouteError(route *selectedRoute, err error) routeOutcome {
+	if route == nil || err == nil {
+		return routeOutcomeTryNext
+	}
+	switch route.egressIface {
+	case string(codec.InterfaceSIP3GPP), string(codec.InterfaceSIPSimple):
+		if code, ok := sipResponseCodeFromError(err); ok && code == 404 {
+			return routeOutcomePermanent
+		}
+		return routeOutcomeWaitTimer
+	case string(codec.InterfaceSGd):
+		var ofaErr *diametersgd.OFAResultError
+		if errors.As(err, &ofaErr) && ofaErr.ResultCode == dcodec.DiameterUnableToDeliver {
+			return routeOutcomeWaitEvent
+		}
+		return routeOutcomeWaitTimer
+	default:
+		return routeOutcomeWaitTimer
+	}
+}
+
+func sipResponseCodeFromError(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	msg := err.Error()
+	idx := strings.Index(msg, " returned ")
+	if idx < 0 {
+		return 0, false
+	}
+	var code int
+	if _, scanErr := fmt.Sscanf(msg[idx+10:], "%d", &code); scanErr != nil {
+		return 0, false
+	}
+	return code, true
+}
+
 func (r *selectedRoute) nextRouteCursor() int {
 	return r.routeIndex + 1
 }
@@ -449,22 +789,23 @@ func (f *Forwarder) persistMessage(ctx context.Context, msg *codec.Message,
 	}
 
 	sm := store.Message{
-		ID:          msg.ID,
-		OriginIface: string(msg.IngressInterface),
-		OriginPeer:  msg.IngressPeer,
-		SMPPMsgID:   msg.SMPPMsgID,
-		EgressIface: egressIface,
-		EgressPeer:  egressPeer,
-		RouteCursor: 0,
-		SrcMSISDN:   msg.Source.MSISDN,
-		DstMSISDN:   msg.Destination.MSISDN,
-		Encoding:    int(msg.Encoding),
-		DCS:         int(msg.DCS),
-		Status:      status,
-		RetryCount:  0,
-		DRRequired:  msg.TPSRRequired,
-		SubmittedAt: now,
-		ExpiryAt:    expiry,
+		ID:                 msg.ID,
+		OriginIface:        string(msg.IngressInterface),
+		OriginPeer:         msg.IngressPeer,
+		SMPPMsgID:          msg.SMPPMsgID,
+		EgressIface:        egressIface,
+		EgressPeer:         egressPeer,
+		RouteCursor:        0,
+		SrcMSISDN:          msg.Source.MSISDN,
+		DstMSISDN:          msg.Destination.MSISDN,
+		AlertCorrelationID: msg.CorrelationID,
+		Encoding:           int(msg.Encoding),
+		DCS:                int(msg.DCS),
+		Status:             status,
+		RetryCount:         0,
+		DRRequired:         msg.TPSRRequired,
+		SubmittedAt:        now,
+		ExpiryAt:           expiry,
 	}
 	switch msg.Encoding {
 	case codec.EncodingBinary:
@@ -484,6 +825,47 @@ func (f *Forwarder) persistMessage(ctx context.Context, msg *codec.Message,
 	}
 	if err := f.st.SaveMessage(ctx, sm); err != nil {
 		slog.Error("forwarder: persist message failed", "id", msg.ID, "err", err)
+	}
+}
+
+func defaultAlertCorrelationID(messageID string) string {
+	return base64.StdEncoding.EncodeToString([]byte("smsc:" + messageID))
+}
+
+func deferredRouteCursor(route *selectedRoute) int {
+	if route == nil {
+		return 0
+	}
+	if route.egressIface == string(codec.InterfaceSGd) {
+		return route.routeIndex
+	}
+	return route.nextRouteCursor()
+}
+
+func (f *Forwarder) markDeferred(ctx context.Context, messageID string, msg *codec.Message, startCursor int, route *selectedRoute) {
+	if messageID == "" {
+		return
+	}
+	if route == nil {
+		route = f.plannedRouteAt(msg, startCursor)
+	}
+	reason := "route_lookup"
+	deferredInterface := ""
+	servingNode := ""
+	routeCursor := 0
+	if route != nil {
+		routeCursor = deferredRouteCursor(route)
+		if route.egressIface == string(codec.InterfaceSGd) {
+			reason = "sgd_lookup"
+			deferredInterface = route.egressIface
+			if route.egressPeer != "" {
+				reason = "sgd_delivery"
+				servingNode = route.egressPeer
+			}
+		}
+	}
+	if err := f.st.UpdateMessageDeferred(ctx, messageID, reason, deferredInterface, servingNode, routeCursor); err != nil {
+		slog.Warn("forwarder: update deferred metadata failed", "id", messageID, "err", err)
 	}
 }
 

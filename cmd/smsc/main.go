@@ -289,17 +289,18 @@ func run(cfgPath string) error {
 
 	// ── Forwarder ────────────────────────────────────────────────────────────
 	fwd := forwarder.New(forwarder.Config{
-		Registry:     reg,
-		Engine:       routingEngine,
-		Store:        st,
-		SCAddr:       scAddr,
-		Metrics:      m,
-		ISCSender:    iscSender,
-		SimpleSender: simpleSender,
-		SMPPManager:  clientMgr,
-		SGdSender:    sgdServer,
-		Reporter:     correlator,
-		SGDMapper:    sgdMapper,
+		Registry:         reg,
+		Engine:           routingEngine,
+		Store:            st,
+		SCAddr:           scAddr,
+		Metrics:          m,
+		ISCSender:        iscSender,
+		SimpleSender:     simpleSender,
+		SMPPManager:      clientMgr,
+		SGdSender:        sgdServer,
+		Reporter:         correlator,
+		SGDMapper:        sgdMapper,
+		MaxQueueLifetime: cfg.SMSC.MaxQueueLifetime,
 	})
 
 	// ── Retry Scheduler ───────────────────────────────────────────────────────
@@ -472,41 +473,92 @@ func run(cfgPath string) error {
 			a.Enabled == b.Enabled
 	}
 
-	triggerAlertSCRetry := func(req s6c.AlertServiceCentreRequest) error {
-		msisdn := req.MSISDN
-		if msisdn == "" {
-			return fmt.Errorf("s6c ALSC missing MSISDN")
+	triggerAlertRetry := func(source, msisdn, imsi, alertCorrelationID, deferredInterface string) error {
+		if alertCorrelationID == "" && msisdn == "" {
+			return fmt.Errorf("%s ALR missing subscriber identity", source)
 		}
 
-		msgs, err := st.ListFilteredMessages(ctx, store.MessageFilter{
-			Statuses:  []string{store.MessageStatusQueued},
-			DstMSISDN: msisdn,
-			Limit:     1000,
-		})
+		filter := store.MessageFilter{
+			Statuses: []string{
+				store.MessageStatusQueued,
+				store.MessageStatusWaitTimer,
+				store.MessageStatusWaitEvent,
+				store.MessageStatusWaitTimerEvent,
+			},
+			AlertCorrelationID: alertCorrelationID,
+			DstMSISDN:          msisdn,
+			DeferredInterface:  deferredInterface,
+			Limit:              1000,
+		}
+		if alertCorrelationID != "" {
+			filter.DstMSISDN = ""
+		}
+
+		msgs, err := st.ListFilteredMessages(ctx, filter)
 		if err != nil {
 			return fmt.Errorf("list deferred messages for %s: %w", msisdn, err)
 		}
+		if len(msgs) == 0 && alertCorrelationID != "" && msisdn != "" {
+			fallbackFilter := store.MessageFilter{
+				Statuses: []string{
+					store.MessageStatusQueued,
+					store.MessageStatusWaitTimer,
+					store.MessageStatusWaitEvent,
+					store.MessageStatusWaitTimerEvent,
+				},
+				DstMSISDN:         msisdn,
+				DeferredInterface: deferredInterface,
+				Limit:             1000,
+			}
+			msgs, err = st.ListFilteredMessages(ctx, fallbackFilter)
+			if err != nil {
+				return fmt.Errorf("list deferred fallback messages for %s: %w", msisdn, err)
+			}
+		}
 
 		var requeued int
+		var skipped int
 		now := time.Now()
 		for _, msg := range msgs {
-			if msg.EgressIface != string(codec.InterfaceSGd) {
+			deferredReason := ""
+			if source == "sgd" && deferredInterface == string(codec.InterfaceSGd) {
+				deferredReason = "sgd_alert_retry"
+			}
+			ok, err := st.RequeueMessageForAlert(ctx, msg.ID, now, msg.RouteCursor, deferredReason, []string{
+				store.MessageStatusQueued,
+				store.MessageStatusWaitTimer,
+				store.MessageStatusWaitEvent,
+				store.MessageStatusWaitTimerEvent,
+			})
+			if err != nil {
+				slog.Warn(source+" ALR requeue failed", "message_id", msg.ID, "msisdn", msisdn, "alert_correlation_id", alertCorrelationID, "err", err)
 				continue
 			}
-			if err := st.UpdateMessageRetry(ctx, msg.ID, msg.RetryCount, now, msg.RouteCursor); err != nil {
-				slog.Warn("s6c ALSC requeue failed", "message_id", msg.ID, "msisdn", msisdn, "err", err)
+			if !ok {
+				skipped++
+				slog.Debug(source+" ALR stale or already claimed", "message_id", msg.ID, "msisdn", msisdn, "alert_correlation_id", alertCorrelationID)
 				continue
 			}
 			requeued++
 		}
 
-		slog.Info("s6c ALSC processed",
+		slog.Info(source+" ALR processed",
 			"msisdn", msisdn,
-			"imsi", req.IMSI,
+			"imsi", imsi,
+			"alert_correlation_id", alertCorrelationID,
+			"deferred_interface", deferredInterface,
 			"requeued", requeued,
+			"skipped", skipped,
 		)
 		return nil
 	}
+	triggerAlertSCRetry := func(req s6c.AlertServiceCentreRequest) error {
+		return triggerAlertRetry("s6c", req.MSISDN, req.IMSI, req.AlertCorrelationID, "")
+	}
+	triggerSGdAlertRetry := func(req sgd.AlertServiceCentreRequest) error {
+		return triggerAlertRetry("sgd", req.MSISDN, req.IMSI, req.AlertCorrelationID, string(codec.InterfaceSGd))
+	}
+	sgdServer.SetOnAlertServiceCentre(triggerSGdAlertRetry)
 
 	syncHSSPeers := func() {
 		peers, err := st.ListDiameterPeers(ctx)
@@ -730,7 +782,11 @@ func run(cfgPath string) error {
 			}
 			// Store-and-forward queue depth and expired count (DB-authoritative).
 			if counts, err := st.CountMessagesByStatus(ctx); err == nil {
-				queuedInFlight := counts[store.MessageStatusQueued] + counts[store.MessageStatusDispatched]
+				queuedInFlight := counts[store.MessageStatusQueued] +
+					counts[store.MessageStatusDispatched] +
+					counts[store.MessageStatusWaitTimer] +
+					counts[store.MessageStatusWaitEvent] +
+					counts[store.MessageStatusWaitTimerEvent]
 				m.SFQueued.Set(float64(queuedInFlight))
 				m.SFExpired.Set(float64(counts[store.MessageStatusExpired]))
 			}

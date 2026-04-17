@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS routing_rules (
     match_dst_prefix TEXT,
     match_msisdn_min TEXT,
     match_msisdn_max TEXT,
-    egress_iface     TEXT NOT NULL CHECK (egress_iface IN ('sip3gpp','sipsimple','smpp','sgd')),
+    egress_iface     TEXT NOT NULL CHECK (egress_iface IN ('sip3gpp','sipsimple','smpp')),
     egress_peer   TEXT,
     sf_policy_id     TEXT REFERENCES sf_policies(id),
     enabled          INTEGER NOT NULL DEFAULT 1,
@@ -125,12 +125,16 @@ CREATE TABLE IF NOT EXISTS messages (
     route_cursor     INTEGER NOT NULL DEFAULT 0,
     src_msisdn       TEXT,
     dst_msisdn       TEXT,
+    alert_correlation_id    TEXT,
+    deferred_reason         TEXT,
+    deferred_interface      TEXT,
+    serving_node_at_deferral TEXT,
     payload          BLOB,
     udh              BLOB,
     encoding         INTEGER,
     dcs              INTEGER,
     status           TEXT NOT NULL DEFAULT 'QUEUED'
-                         CHECK (status IN ('QUEUED','DISPATCHED','DELIVERED','FAILED','EXPIRED')),
+                         CHECK (status IN ('QUEUED','DISPATCHED','WAIT_TIMER','WAIT_EVENT','WAIT_TIMER_EVENT','DELIVERED','FAILED','EXPIRED')),
     retry_count      INTEGER NOT NULL DEFAULT 0,
     next_retry_at    TEXT,
     dr_required      INTEGER NOT NULL DEFAULT 0,
@@ -165,6 +169,7 @@ CREATE TABLE IF NOT EXISTS delivery_reports (
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_messages_status          ON messages (status);
 CREATE INDEX IF NOT EXISTS idx_messages_dst_msisdn      ON messages (dst_msisdn);
+CREATE INDEX IF NOT EXISTS idx_messages_alert_corr      ON messages (alert_correlation_id);
 CREATE INDEX IF NOT EXISTS idx_messages_next_retry_at   ON messages (next_retry_at);
 CREATE INDEX IF NOT EXISTS idx_messages_expiry_at       ON messages (expiry_at);
 CREATE INDEX IF NOT EXISTS idx_ims_registrations_msisdn ON ims_registrations (msisdn);

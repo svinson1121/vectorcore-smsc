@@ -497,10 +497,19 @@ type routingRuleInput struct {
 	MatchDstPrefix string `json:"match_dst_prefix,omitempty"`
 	MatchMSISDNMin string `json:"match_msisdn_min,omitempty"`
 	MatchMSISDNMax string `json:"match_msisdn_max,omitempty"`
-	EgressIface    string `json:"egress_iface" enum:"sip3gpp,sipsimple,smpp,sgd"`
+	EgressIface    string `json:"egress_iface" enum:"sipsimple,smpp"`
 	EgressPeer     string `json:"egress_peer,omitempty"`
 	SFPolicyID     string `json:"sf_policy_id,omitempty"`
 	Enabled        bool   `json:"enabled"`
+}
+
+func validateRoutingRuleInput(in routingRuleInput) error {
+	switch in.EgressIface {
+	case "smpp", "sipsimple":
+		return nil
+	default:
+		return huma.Error400BadRequest("routing rules only support fallback interfaces: smpp, sipsimple", nil)
+	}
 }
 
 func registerRoutingRules(api huma.API, st store.Store) {
@@ -536,6 +545,9 @@ func registerRoutingRules(api huma.API, st store.Store) {
 		Path: "/api/v1/routing/rules", Summary: "Create routing rule",
 		Tags: []string{"Routing"}, DefaultStatus: http.StatusCreated,
 	}, func(ctx context.Context, input *struct{ Body routingRuleInput }) (*struct{}, error) {
+		if err := validateRoutingRuleInput(input.Body); err != nil {
+			return nil, err
+		}
 		return nil, dbErr(st.CreateRoutingRule(ctx, routingRuleFromInput(input.Body)))
 	})
 
@@ -545,6 +557,9 @@ func registerRoutingRules(api huma.API, st store.Store) {
 		ID   string `path:"id"`
 		Body routingRuleInput
 	}) (*struct{}, error) {
+		if err := validateRoutingRuleInput(input.Body); err != nil {
+			return nil, err
+		}
 		r := routingRuleFromInput(input.Body)
 		r.ID = input.ID
 		return nil, dbErr(st.UpdateRoutingRule(ctx, r))
@@ -777,7 +792,7 @@ func registerMessages(api huma.API, st store.Store) {
 	})
 
 	huma.Register(api, huma.Operation{OperationID: "list-queue-messages", Method: http.MethodGet,
-		Path: "/api/v1/messages/queue", Summary: "List queued or dispatched messages", Tags: []string{"Messages"},
+		Path: "/api/v1/messages/queue", Summary: "List queued, waiting, or dispatched messages", Tags: []string{"Messages"},
 	}, func(ctx context.Context, input *struct {
 		Limit      int    `query:"limit" default:"100"`
 		SrcMSISDN  string `query:"src_msisdn"`
@@ -785,7 +800,13 @@ func registerMessages(api huma.API, st store.Store) {
 		OriginPeer string `query:"origin_peer"`
 	}) (*struct{ Body []store.Message }, error) {
 		v, err := st.ListFilteredMessages(ctx, store.MessageFilter{
-			Statuses:   []string{store.MessageStatusQueued, store.MessageStatusDispatched},
+			Statuses: []string{
+				store.MessageStatusQueued,
+				store.MessageStatusDispatched,
+				store.MessageStatusWaitTimer,
+				store.MessageStatusWaitEvent,
+				store.MessageStatusWaitTimerEvent,
+			},
 			SrcMSISDN:  input.SrcMSISDN,
 			DstMSISDN:  input.DstMSISDN,
 			OriginPeer: input.OriginPeer,
@@ -801,7 +822,7 @@ func registerMessages(api huma.API, st store.Store) {
 	})
 
 	huma.Register(api, huma.Operation{OperationID: "delete-queue-message", Method: http.MethodDelete,
-		Path: "/api/v1/messages/queue/{id}", Summary: "Delete a queued or dispatched message",
+		Path: "/api/v1/messages/queue/{id}", Summary: "Delete a queued, waiting, or dispatched message",
 		Tags: []string{"Messages"}, DefaultStatus: http.StatusNoContent,
 	}, func(ctx context.Context, input *struct {
 		ID string `path:"id"`
@@ -813,8 +834,14 @@ func registerMessages(api huma.API, st store.Store) {
 		if msg == nil {
 			return nil, notFound("message not found")
 		}
-		if msg.Status != store.MessageStatusQueued && msg.Status != store.MessageStatusDispatched {
-			return nil, huma.Error409Conflict("only queued or dispatched messages can be deleted from the queue view", nil)
+		switch msg.Status {
+		case store.MessageStatusQueued,
+			store.MessageStatusDispatched,
+			store.MessageStatusWaitTimer,
+			store.MessageStatusWaitEvent,
+			store.MessageStatusWaitTimerEvent:
+		default:
+			return nil, huma.Error409Conflict("only queued, waiting, or dispatched messages can be deleted from the queue view", nil)
 		}
 		return nil, dbErr(st.DeleteMessage(ctx, input.ID))
 	})

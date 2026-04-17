@@ -134,45 +134,54 @@ type RoutingRule struct {
 
 // MessageStatus values for the messages table.
 const (
-	MessageStatusQueued     = "QUEUED"
-	MessageStatusDispatched = "DISPATCHED"
-	MessageStatusDelivered  = "DELIVERED"
-	MessageStatusFailed     = "FAILED"
-	MessageStatusExpired    = "EXPIRED"
+	MessageStatusQueued         = "QUEUED"
+	MessageStatusDispatched     = "DISPATCHED"
+	MessageStatusWaitTimer      = "WAIT_TIMER"
+	MessageStatusWaitEvent      = "WAIT_EVENT"
+	MessageStatusWaitTimerEvent = "WAIT_TIMER_EVENT"
+	MessageStatusDelivered      = "DELIVERED"
+	MessageStatusFailed         = "FAILED"
+	MessageStatusExpired        = "EXPIRED"
 )
 
 // Message mirrors the messages table.
 type Message struct {
-	ID          string     `json:"id"`
-	TPMR        *int       `json:"tp_mr"`
-	SMPPMsgID   string     `json:"smpp_msg_id"`
-	OriginIface string     `json:"origin_iface"`
-	OriginPeer  string     `json:"origin_peer"`
-	EgressIface string     `json:"egress_iface"`
-	EgressPeer  string     `json:"egress_peer"`
-	RouteCursor int        `json:"route_cursor"`
-	SrcMSISDN   string     `json:"src_msisdn"`
-	DstMSISDN   string     `json:"dst_msisdn"`
-	Payload     []byte     `json:"payload,omitempty"`
-	UDH         []byte     `json:"udh,omitempty"`
-	Encoding    int        `json:"encoding"`
-	DCS         int        `json:"dcs"`
-	Status      string     `json:"status"`
-	RetryCount  int        `json:"retry_count"`
-	NextRetryAt *time.Time `json:"next_retry_at"`
-	DRRequired  bool       `json:"dr_required"`
-	SubmittedAt time.Time  `json:"submitted_at"`
-	ExpiryAt    *time.Time `json:"expiry_at"`
-	DeliveredAt *time.Time `json:"delivered_at"`
+	ID                    string     `json:"id"`
+	TPMR                  *int       `json:"tp_mr"`
+	SMPPMsgID             string     `json:"smpp_msg_id"`
+	OriginIface           string     `json:"origin_iface"`
+	OriginPeer            string     `json:"origin_peer"`
+	EgressIface           string     `json:"egress_iface"`
+	EgressPeer            string     `json:"egress_peer"`
+	RouteCursor           int        `json:"route_cursor"`
+	SrcMSISDN             string     `json:"src_msisdn"`
+	DstMSISDN             string     `json:"dst_msisdn"`
+	AlertCorrelationID    string     `json:"alert_correlation_id"`
+	DeferredReason        string     `json:"deferred_reason"`
+	DeferredInterface     string     `json:"deferred_interface"`
+	ServingNodeAtDeferral string     `json:"serving_node_at_deferral"`
+	Payload               []byte     `json:"payload,omitempty"`
+	UDH                   []byte     `json:"udh,omitempty"`
+	Encoding              int        `json:"encoding"`
+	DCS                   int        `json:"dcs"`
+	Status                string     `json:"status"`
+	RetryCount            int        `json:"retry_count"`
+	NextRetryAt           *time.Time `json:"next_retry_at"`
+	DRRequired            bool       `json:"dr_required"`
+	SubmittedAt           time.Time  `json:"submitted_at"`
+	ExpiryAt              *time.Time `json:"expiry_at"`
+	DeliveredAt           *time.Time `json:"delivered_at"`
 }
 
 // MessageFilter narrows list queries for operational views.
 type MessageFilter struct {
-	Statuses   []string
-	SrcMSISDN  string
-	DstMSISDN  string
-	OriginPeer string
-	Limit      int
+	Statuses           []string
+	SrcMSISDN          string
+	DstMSISDN          string
+	OriginPeer         string
+	AlertCorrelationID string
+	DeferredInterface  string
+	Limit              int
 }
 
 // SGDMMEMapping mirrors the sgd_mme_mappings table.
@@ -233,8 +242,12 @@ type Store interface {
 	// Messages (store-and-forward)
 	SaveMessage(ctx context.Context, msg Message) error
 	UpdateMessageRouting(ctx context.Context, id, egressIface, egressPeer string) error
+	UpdateMessageDeferred(ctx context.Context, id, deferredReason, deferredInterface, servingNodeAtDeferral string, routeCursor int) error
 	UpdateMessageStatus(ctx context.Context, id, status string) error
+	ClaimMessageForDispatch(ctx context.Context, id string, allowedStatuses []string) (bool, error)
 	UpdateMessageRetry(ctx context.Context, id string, retryCount int, nextRetryAt time.Time, routeCursor int) error
+	UpdateMessageExpiryCap(ctx context.Context, id string, expiryAt time.Time) error
+	RequeueMessageForAlert(ctx context.Context, id string, nextRetryAt time.Time, routeCursor int, deferredReason string, allowedStatuses []string) (bool, error)
 	ListRetryableMessages(ctx context.Context) ([]Message, error)
 	ListExpiredMessages(ctx context.Context) ([]Message, error)
 	GetMessage(ctx context.Context, id string) (*Message, error)

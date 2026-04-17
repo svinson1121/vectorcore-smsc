@@ -66,7 +66,16 @@ func Open(ctx context.Context, dsn string, pollInterval time.Duration) (*DB, err
 	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN udh BLOB`)
 	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN encoding INTEGER`)
 	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN route_cursor INTEGER NOT NULL DEFAULT 0`)
+	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN alert_correlation_id TEXT`)
+	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN deferred_reason TEXT`)
+	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN deferred_interface TEXT`)
+	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN serving_node_at_deferral TEXT`)
 	sqlDB.ExecContext(ctx, `ALTER TABLE subscribers ADD COLUMN mme_number TEXT`)
+	sqlDB.ExecContext(ctx, `UPDATE smpp_server_accounts
+		SET default_route_id = NULL
+		WHERE default_route_id IN (SELECT id FROM routing_rules WHERE egress_iface = 'sgd')`)
+	sqlDB.ExecContext(ctx, `DELETE FROM routing_rules WHERE egress_iface = 'sgd'`)
+	sqlDB.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_messages_alert_corr ON messages (alert_correlation_id)`)
 	// Crash recovery: messages stuck in DISPATCHED state (server died mid-send)
 	// are reset to QUEUED so the retry scheduler re-attempts them.
 	sqlDB.ExecContext(ctx, `UPDATE messages SET status='QUEUED', next_retry_at=datetime('now') WHERE status='DISPATCHED'`)

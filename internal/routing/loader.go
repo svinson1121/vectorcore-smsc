@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/svinson1121/vectorcore-smsc/internal/codec"
 	"github.com/svinson1121/vectorcore-smsc/internal/store"
 )
 
@@ -31,6 +32,13 @@ func (l *Loader) load(ctx context.Context) error {
 	rules, err := l.st.ListRoutingRules(ctx)
 	if err != nil {
 		return err
+	}
+	for _, rule := range rules {
+		switch rule.EgressIface {
+		case string(codec.InterfaceSMPP), string(codec.InterfaceSIPSimple):
+		default:
+			slog.Warn("routing rule ignored by runtime", "rule", rule.Name, "egress_iface", rule.EgressIface)
+		}
 	}
 	l.engine.Reload(rules)
 	return nil

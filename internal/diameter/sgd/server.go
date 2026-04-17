@@ -20,10 +20,11 @@ import (
 
 const gracefulStopTimeout = 5 * time.Second
 const ofrTimeout = 5 * time.Second
-const moAnswerTimeout = 10 * time.Second
-
 // OnMessageFunc is called for each decoded MO/MT message.
 type OnMessageFunc func(msg *codec.Message, peerName string)
+
+// OnAlertServiceCentreFunc is called for inbound SGd Alert-Service-Centre requests.
+type OnAlertServiceCentreFunc func(req AlertServiceCentreRequest) error
 
 // Server listens for inbound Diameter SGd connections from MMEs and can also
 // send MT messages (TFR) back to connected MMEs.
@@ -34,6 +35,7 @@ type Server struct {
 	localRealm     string
 	scAddrEncoding string
 	onMsg          OnMessageFunc
+	onAlertSC      OnAlertServiceCentreFunc
 
 	// Active peers keyed by RemoteFQDN (or remote addr for inbound before CEA).
 	mu            sync.RWMutex
@@ -46,6 +48,15 @@ type Server struct {
 type pendingMORequest struct {
 	peer *diameter.Peer
 	req  *dcodec.Message
+}
+
+// OFAResultError captures a non-success SGd OFA result code.
+type OFAResultError struct {
+	ResultCode uint32
+}
+
+func (e *OFAResultError) Error() string {
+	return fmt.Sprintf("sgd: OFA returned result-code %d", e.ResultCode)
 }
 
 // NewServer creates an SGd server.
@@ -234,6 +245,13 @@ func (s *Server) SetOnMessage(fn OnMessageFunc) {
 	s.mu.Unlock()
 }
 
+// SetOnAlertServiceCentre sets the callback for inbound SGd ALR requests.
+func (s *Server) SetOnAlertServiceCentre(fn OnAlertServiceCentreFunc) {
+	s.mu.Lock()
+	s.onAlertSC = fn
+	s.mu.Unlock()
+}
+
 // SendOFR sends an MT-Forward-Short-Message (TFR) to the MME identified by
 // mmeHost. It implements the forwarder.SGdSender interface.
 func (s *Server) SendOFR(ctx context.Context, msg *codec.Message, mmeHost, scAddr string) error {
@@ -271,7 +289,7 @@ func (s *Server) SendOFR(ctx context.Context, msg *codec.Message, mmeHost, scAdd
 			"result_code", resultCode,
 		)
 		if resultCode != dcodec.DiameterSuccess {
-			return fmt.Errorf("sgd: OFA returned result-code %d", resultCode)
+			return &OFAResultError{ResultCode: resultCode}
 		}
 		return nil
 	case <-time.After(ofrTimeout):
@@ -403,16 +421,6 @@ func (s *Server) CompleteMO(messageID string, rpBody []byte) bool {
 	return s.finishPendingMO(messageID, resultCode, smRPUI)
 }
 
-func (s *Server) timeoutPendingMO(messageID string) {
-	timer := time.NewTimer(moAnswerTimeout)
-	defer timer.Stop()
-
-	<-timer.C
-	if s.finishPendingMO(messageID, dcodec.DiameterUnableToComply, nil) {
-		slog.Warn("sgd MO completion timed out", "id", messageID, "timeout", moAnswerTimeout)
-	}
-}
-
 func (s *Server) handleMOForwardRequest(p *diameter.Peer, req *dcodec.Message) {
 	msg, err := sgdcodec.DecodeTFR(req)
 	if err != nil {
@@ -441,15 +449,15 @@ func (s *Server) handleMOForwardRequest(p *diameter.Peer, req *dcodec.Message) {
 		"corr_id", msg.CorrelationID,
 	)
 
-	s.trackPendingMO(msg.CorrelationID, p, req)
-	go s.timeoutPendingMO(msg.CorrelationID)
-
-	if s.onMsg != nil {
-		s.onMsg(msg, p.RemoteFQDN)
+	if s.onMsg == nil {
+		sendAnswer(p, req, dcodec.DiameterUnableToComply)
 		return
 	}
 
-	s.finishPendingMO(msg.CorrelationID, dcodec.DiameterUnableToComply, nil)
+	// Accept the MO once the SMSC has taken ownership of processing; delivery
+	// continues asynchronously via store-and-forward and downstream interface retries.
+	go s.onMsg(msg, p.RemoteFQDN)
+	sendAnswer(p, req, dcodec.DiameterSuccess)
 }
 
 func mapISCResultToSGdAnswer(body []byte) (uint32, []byte) {
@@ -618,6 +626,8 @@ func (s *Server) dispatch(p *diameter.Peer, msg *dcodec.Message) {
 		}
 	case cmd == dcodec.CmdMOForwardShortMessage && isReq:
 		s.handleMOForwardRequest(p, msg)
+	case cmd == dcodec.CmdAlertServiceCentre && isReq:
+		s.handleAlertServiceCentreRequest(p, msg)
 	default:
 		slog.Debug("diameter SGd unhandled command",
 			"cmd", cmd, "request", isReq)

@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/svinson1121/vectorcore-smsc/internal/codec"
 	"github.com/svinson1121/vectorcore-smsc/internal/diameter/s6c"
 	"github.com/svinson1121/vectorcore-smsc/internal/store"
 )
@@ -13,6 +12,7 @@ import (
 type alertTestStore struct {
 	messages []store.Message
 	updated  map[string]time.Time
+	reasons  map[string]string
 }
 
 func (s *alertTestStore) GetIMSRegistration(context.Context, string) (*store.IMSRegistration, error) {
@@ -67,12 +67,52 @@ func (s *alertTestStore) UpdateMessageRouting(context.Context, string, string, s
 func (s *alertTestStore) UpdateMessageStatus(context.Context, string, string) error {
 	panic("unexpected call")
 }
+func (s *alertTestStore) ClaimMessageForDispatch(context.Context, string, []string) (bool, error) {
+	panic("unexpected call")
+}
 func (s *alertTestStore) UpdateMessageRetry(_ context.Context, id string, _ int, nextRetryAt time.Time, _ int) error {
 	if s.updated == nil {
 		s.updated = map[string]time.Time{}
 	}
 	s.updated[id] = nextRetryAt
 	return nil
+}
+func (s *alertTestStore) UpdateMessageExpiryCap(context.Context, string, time.Time) error {
+	panic("unexpected call")
+}
+func (s *alertTestStore) UpdateMessageDeferred(_ context.Context, id, deferredReason, _, _ string, _ int) error {
+	if s.reasons == nil {
+		s.reasons = map[string]string{}
+	}
+	s.reasons[id] = deferredReason
+	return nil
+}
+func (s *alertTestStore) RequeueMessageForAlert(_ context.Context, id string, nextRetryAt time.Time, _ int, deferredReason string, allowedStatuses []string) (bool, error) {
+	allowed := map[string]struct{}{}
+	for _, status := range allowedStatuses {
+		allowed[status] = struct{}{}
+	}
+	for i := range s.messages {
+		if s.messages[i].ID != id {
+			continue
+		}
+		if _, ok := allowed[s.messages[i].Status]; !ok {
+			return false, nil
+		}
+		s.messages[i].Status = store.MessageStatusWaitTimer
+		if s.updated == nil {
+			s.updated = map[string]time.Time{}
+		}
+		s.updated[id] = nextRetryAt
+		if deferredReason != "" {
+			if s.reasons == nil {
+				s.reasons = map[string]string{}
+			}
+			s.reasons[id] = deferredReason
+		}
+		return true, nil
+	}
+	return false, nil
 }
 func (s *alertTestStore) ListRetryableMessages(context.Context) ([]store.Message, error) {
 	panic("unexpected call")
@@ -174,6 +214,12 @@ func (s *alertTestStore) ListFilteredMessages(_ context.Context, filter store.Me
 		if filter.DstMSISDN != "" && msg.DstMSISDN != filter.DstMSISDN {
 			continue
 		}
+		if filter.AlertCorrelationID != "" && msg.AlertCorrelationID != filter.AlertCorrelationID {
+			continue
+		}
+		if filter.DeferredInterface != "" && msg.DeferredInterface != filter.DeferredInterface {
+			continue
+		}
 		matchStatus := len(filter.Statuses) == 0
 		for _, status := range filter.Statuses {
 			if msg.Status == status {
@@ -218,49 +264,97 @@ func (s *alertTestStore) DeleteSGDMMEMapping(context.Context, string) error {
 
 func makeALSCRequeueHandler(st store.Store) func(s6c.AlertServiceCentreRequest) error {
 	return func(req s6c.AlertServiceCentreRequest) error {
-		msisdn := req.MSISDN
-		if msisdn == "" {
+		if req.AlertCorrelationID == "" && req.MSISDN == "" {
 			return nil
 		}
-		msgs, err := st.ListFilteredMessages(context.Background(), store.MessageFilter{
-			Statuses:  []string{store.MessageStatusQueued},
-			DstMSISDN: msisdn,
-			Limit:     1000,
-		})
+		filter := store.MessageFilter{
+			Statuses: []string{
+				store.MessageStatusQueued,
+				store.MessageStatusWaitTimer,
+				store.MessageStatusWaitEvent,
+				store.MessageStatusWaitTimerEvent,
+			},
+			DstMSISDN:          req.MSISDN,
+			AlertCorrelationID: req.AlertCorrelationID,
+			Limit:              1000,
+		}
+		if req.AlertCorrelationID != "" {
+			filter.DstMSISDN = ""
+		}
+		msgs, err := st.ListFilteredMessages(context.Background(), filter)
 		if err != nil {
 			return err
 		}
 		now := time.Now()
 		for _, msg := range msgs {
-			if msg.EgressIface != string(codec.InterfaceSGd) {
-				continue
-			}
-			if err := st.UpdateMessageRetry(context.Background(), msg.ID, msg.RetryCount, now, msg.RouteCursor); err != nil {
+			ok, err := st.RequeueMessageForAlert(context.Background(), msg.ID, now, msg.RouteCursor, "", []string{
+				store.MessageStatusQueued,
+				store.MessageStatusWaitTimer,
+				store.MessageStatusWaitEvent,
+				store.MessageStatusWaitTimerEvent,
+			})
+			if err != nil {
 				return err
+			}
+			if !ok {
+				continue
 			}
 		}
 		return nil
 	}
 }
 
-func TestALSCRequeueHandlerOnlyRequeuesQueuedSGdMessages(t *testing.T) {
+func TestALSCRequeueHandlerRequeuesQueuedMessagesByCorrelationFirst(t *testing.T) {
 	st := &alertTestStore{
 		messages: []store.Message{
-			{ID: "m1", DstMSISDN: "3342012832", Status: store.MessageStatusQueued, EgressIface: string(codec.InterfaceSGd)},
-			{ID: "m2", DstMSISDN: "3342012832", Status: store.MessageStatusQueued, EgressIface: string(codec.InterfaceSMPP)},
-			{ID: "m3", DstMSISDN: "1111111111", Status: store.MessageStatusQueued, EgressIface: string(codec.InterfaceSGd)},
+			{ID: "m1", DstMSISDN: "3342012832", Status: store.MessageStatusQueued, AlertCorrelationID: "corr-1"},
+			{ID: "m2", DstMSISDN: "3342012832", Status: store.MessageStatusQueued, AlertCorrelationID: "corr-2"},
+			{ID: "m3", DstMSISDN: "1111111111", Status: store.MessageStatusQueued, AlertCorrelationID: "corr-1"},
 		},
 	}
 
 	handler := makeALSCRequeueHandler(st)
-	if err := handler(s6c.AlertServiceCentreRequest{MSISDN: "3342012832"}); err != nil {
+	if err := handler(s6c.AlertServiceCentreRequest{AlertCorrelationID: "corr-1"}); err != nil {
 		t.Fatalf("handler() error = %v", err)
 	}
 
-	if got, want := len(st.updated), 1; got != want {
+	if got, want := len(st.updated), 2; got != want {
 		t.Fatalf("updated messages = %d, want %d", got, want)
 	}
 	if _, ok := st.updated["m1"]; !ok {
 		t.Fatal("expected m1 to be requeued")
+	}
+	if _, ok := st.updated["m3"]; !ok {
+		t.Fatal("expected m3 to be requeued")
+	}
+}
+
+func TestAlertStoreDeferredMarkerCanBeUpdated(t *testing.T) {
+	st := &alertTestStore{}
+	if err := st.UpdateMessageDeferred(context.Background(), "m1", "sgd_alert_retry", "sgd", "mme01.example.net", 2); err != nil {
+		t.Fatalf("UpdateMessageDeferred() error = %v", err)
+	}
+	if got, want := st.reasons["m1"], "sgd_alert_retry"; got != want {
+		t.Fatalf("deferred reason = %q, want %q", got, want)
+	}
+}
+
+func TestAlertStoreRequeueSkipsDeliveredMessages(t *testing.T) {
+	st := &alertTestStore{
+		messages: []store.Message{
+			{ID: "m1", Status: store.MessageStatusDelivered},
+		},
+	}
+	ok, err := st.RequeueMessageForAlert(context.Background(), "m1", time.Now(), 0, "", []string{
+		store.MessageStatusQueued,
+		store.MessageStatusWaitTimer,
+		store.MessageStatusWaitEvent,
+		store.MessageStatusWaitTimerEvent,
+	})
+	if err != nil {
+		t.Fatalf("RequeueMessageForAlert() error = %v", err)
+	}
+	if ok {
+		t.Fatal("expected delivered message requeue to be skipped")
 	}
 }

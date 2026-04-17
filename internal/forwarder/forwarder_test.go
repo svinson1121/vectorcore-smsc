@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/svinson1121/vectorcore-smsc/internal/codec"
+	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
 	"github.com/svinson1121/vectorcore-smsc/internal/diameter/s6c"
+	diametersgd "github.com/svinson1121/vectorcore-smsc/internal/diameter/sgd"
 	"github.com/svinson1121/vectorcore-smsc/internal/registry"
 	"github.com/svinson1121/vectorcore-smsc/internal/routing"
 	"github.com/svinson1121/vectorcore-smsc/internal/store"
@@ -15,6 +17,7 @@ import (
 type forwarderTestStore struct {
 	subscriber    *store.Subscriber
 	sipPeers      map[string]store.SIPPeer
+	sfPolicies    map[string]store.SFPolicy
 	saved         *store.Message
 	routeIface    string
 	routePeer     string
@@ -23,6 +26,14 @@ type forwarderTestStore struct {
 	retryCount    int
 	routeCursor   int
 	nextRetryAt   *time.Time
+	expiryCapAt   *time.Time
+	claimBlocked  bool
+	deferred      *struct {
+		reason      string
+		iface       string
+		servingNode string
+		routeCursor int
+	}
 }
 
 func (s *forwarderTestStore) GetIMSRegistration(context.Context, string) (*store.IMSRegistration, error) {
@@ -71,8 +82,16 @@ func (s *forwarderTestStore) GetDiameterPeer(context.Context, string) (*store.Di
 func (s *forwarderTestStore) ListRoutingRules(context.Context) ([]store.RoutingRule, error) {
 	panic("unexpected call")
 }
-func (s *forwarderTestStore) GetSFPolicy(context.Context, string) (*store.SFPolicy, error) {
-	return nil, nil
+func (s *forwarderTestStore) GetSFPolicy(_ context.Context, id string) (*store.SFPolicy, error) {
+	if s.sfPolicies == nil {
+		return nil, nil
+	}
+	pol, ok := s.sfPolicies[id]
+	if !ok {
+		return nil, nil
+	}
+	cp := pol
+	return &cp, nil
 }
 func (s *forwarderTestStore) SaveMessage(_ context.Context, msg store.Message) error {
 	cp := msg
@@ -93,11 +112,52 @@ func (s *forwarderTestStore) UpdateMessageStatus(_ context.Context, _ string, st
 	s.statusUpdates = append(s.statusUpdates, status)
 	return nil
 }
+func (s *forwarderTestStore) ClaimMessageForDispatch(_ context.Context, _ string, _ []string) (bool, error) {
+	if s.claimBlocked {
+		return false, nil
+	}
+	s.statusUpdates = append(s.statusUpdates, store.MessageStatusDispatched)
+	return true, nil
+}
 func (s *forwarderTestStore) UpdateMessageRetry(_ context.Context, _ string, retryCount int, nextRetryAt time.Time, routeCursor int) error {
 	s.retryCount = retryCount
 	s.routeCursor = routeCursor
 	s.nextRetryAt = &nextRetryAt
 	return nil
+}
+func (s *forwarderTestStore) UpdateMessageExpiryCap(_ context.Context, _ string, expiryAt time.Time) error {
+	s.expiryCapAt = &expiryAt
+	return nil
+}
+func (s *forwarderTestStore) UpdateMessageDeferred(_ context.Context, _ string, deferredReason, deferredInterface, servingNodeAtDeferral string, routeCursor int) error {
+	s.deferred = &struct {
+		reason      string
+		iface       string
+		servingNode string
+		routeCursor int
+	}{
+		reason:      deferredReason,
+		iface:       deferredInterface,
+		servingNode: servingNodeAtDeferral,
+		routeCursor: routeCursor,
+	}
+	return nil
+}
+func (s *forwarderTestStore) RequeueMessageForAlert(_ context.Context, _ string, nextRetryAt time.Time, routeCursor int, deferredReason string, _ []string) (bool, error) {
+	s.routeCursor = routeCursor
+	s.nextRetryAt = &nextRetryAt
+	if deferredReason != "" {
+		s.deferred = &struct {
+			reason      string
+			iface       string
+			servingNode string
+			routeCursor int
+		}{
+			reason:      deferredReason,
+			routeCursor: routeCursor,
+		}
+	}
+	return true, nil
 }
 func (s *forwarderTestStore) ListRetryableMessages(context.Context) ([]store.Message, error) {
 	panic("unexpected call")
@@ -262,10 +322,19 @@ type fakeSimpleSender struct {
 	calls int
 	err   error
 	errs  []error
+	msgs  []*codec.Message
 }
 
-func (f *fakeSimpleSender) Send(context.Context, *codec.Message, store.SIPPeer) error {
+func (f *fakeSimpleSender) Send(_ context.Context, msg *codec.Message, _ store.SIPPeer) error {
 	f.calls++
+	if msg != nil {
+		cp := *msg
+		if msg.ValidityPeriod != nil {
+			d := *msg.ValidityPeriod
+			cp.ValidityPeriod = &d
+		}
+		f.msgs = append(f.msgs, &cp)
+	}
 	if idx := f.calls - 1; idx >= 0 && idx < len(f.errs) && f.errs[idx] != nil {
 		return f.errs[idx]
 	}
@@ -286,14 +355,17 @@ func (f *fakeS6cClient) LookupRouting(msisdn string) (*s6c.RoutingInfo, error) {
 type fakeSGdSender struct {
 	lastSCAddr string
 	lastMME    string
+	err        error
 }
 
 func (f *fakeSGdSender) SendOFR(_ context.Context, _ *codec.Message, mmeHost, scAddr string) error {
 	f.lastMME = mmeHost
 	f.lastSCAddr = scAddr
-	return nil
+	return f.err
 }
 func (f *fakeSGdSender) HasPeerForMME(string) bool { return true }
+
+func durationPtr(d time.Duration) *time.Duration { return &d }
 
 func newTestRegistry(t *testing.T, st store.Store) *registry.Registry {
 	t.Helper()
@@ -304,7 +376,7 @@ func newTestRegistry(t *testing.T, st store.Store) *registry.Registry {
 	return reg
 }
 
-func TestSelectRouteUsesS6cOnlyForSGdCandidates(t *testing.T) {
+func TestSelectRouteUsesS6cOnlyForFallbackCandidates(t *testing.T) {
 	st := &forwarderTestStore{
 		sipPeers: map[string]store.SIPPeer{
 			"simple1": {Name: "simple1"},
@@ -330,7 +402,7 @@ func TestSelectRouteUsesS6cOnlyForSGdCandidates(t *testing.T) {
 	route, err := f.selectRoute(context.Background(), &codec.Message{
 		IngressInterface: codec.InterfaceSMPP,
 		Destination:      codec.Address{MSISDN: "3342012860"},
-	}, 0)
+	}, 3)
 	if err != nil {
 		t.Fatalf("selectRoute() error = %v", err)
 	}
@@ -451,6 +523,38 @@ func TestStoreToCodecMessageRestoresTextPayload(t *testing.T) {
 	}
 }
 
+func TestStoreToCodecMessageRestoresAlertCorrelationID(t *testing.T) {
+	m := store.Message{
+		ID:                 "msg-corr-1",
+		OriginIface:        string(codec.InterfaceSMPP),
+		AlertCorrelationID: "corr-123",
+	}
+
+	msg := storeToCodecMessage(m)
+	if got, want := msg.CorrelationID, "corr-123"; got != want {
+		t.Fatalf("correlation_id = %q, want %q", got, want)
+	}
+}
+
+func TestStoreToCodecMessageRestoresRemainingValidityPeriodFromExpiry(t *testing.T) {
+	expiry := time.Now().Add(10 * time.Minute)
+	m := store.Message{
+		ID:       "msg-expiry-1",
+		ExpiryAt: &expiry,
+	}
+
+	msg := storeToCodecMessage(m)
+	if msg.ValidityPeriod == nil {
+		t.Fatal("expected validity period to be restored from expiry")
+	}
+	if *msg.ValidityPeriod <= 0 {
+		t.Fatalf("validity period = %v, want positive", *msg.ValidityPeriod)
+	}
+	if *msg.ValidityPeriod > 10*time.Minute || *msg.ValidityPeriod < 9*time.Minute {
+		t.Fatalf("validity period = %v, want about 10m remaining", *msg.ValidityPeriod)
+	}
+}
+
 func TestSelectRouteFallsThroughFromSGdToNextRule(t *testing.T) {
 	st := &forwarderTestStore{
 		sipPeers: map[string]store.SIPPeer{
@@ -463,7 +567,6 @@ func TestSelectRouteFallsThroughFromSGdToNextRule(t *testing.T) {
 
 	engine := routing.NewEngine()
 	engine.Reload([]store.RoutingRule{
-		{Name: "sgd-first", Priority: 10, MatchSrcIface: "smpp", MatchDstPrefix: "334", EgressIface: "sgd"},
 		{Name: "simple-second", Priority: 20, MatchSrcIface: "smpp", MatchDstPrefix: "334", EgressIface: "sipsimple", EgressPeer: "simple1"},
 	})
 
@@ -514,7 +617,6 @@ func TestSelectRouteRefreshesS6cBeforeSGdWhenSubscriberCacheClaimsAttached(t *te
 
 	engine := routing.NewEngine()
 	engine.Reload([]store.RoutingRule{
-		{Name: "sgd-first", Priority: 10, MatchSrcIface: "smpp", MatchDstPrefix: "334", EgressIface: "sgd"},
 		{Name: "simple-second", Priority: 20, MatchSrcIface: "smpp", MatchDstPrefix: "334", EgressIface: "sipsimple", EgressPeer: "simple1"},
 	})
 
@@ -564,15 +666,13 @@ func TestSelectRouteUsesFreshS6cCacheForSGdCandidate(t *testing.T) {
 	reg.SetS6cClient(s6cClient)
 
 	engine := routing.NewEngine()
-	engine.Reload([]store.RoutingRule{
-		{Name: "sgd-first", Priority: 10, MatchSrcIface: "smpp", MatchDstPrefix: "334", EgressIface: "sgd"},
-	})
 
 	f := New(Config{
-		Registry:  reg,
-		Engine:    engine,
-		Store:     st,
-		SGdSender: &fakeSGdSender{},
+		Registry:         reg,
+		Engine:           engine,
+		Store:            st,
+		SGdSender:        &fakeSGdSender{},
+		MaxQueueLifetime: 2 * time.Hour,
 	})
 
 	route, err := f.selectRoute(context.Background(), &codec.Message{
@@ -613,9 +713,6 @@ func TestSelectRouteUsesFreshS6cCacheHexMMENumberForSGdCandidate(t *testing.T) {
 	reg.SetS6cClient(s6cClient)
 
 	engine := routing.NewEngine()
-	engine.Reload([]store.RoutingRule{
-		{Name: "sgd-first", Priority: 10, MatchSrcIface: "smpp", MatchDstPrefix: "334", EgressIface: "sgd"},
-	})
 
 	sgdSender := &fakeSGdSender{}
 	f := New(Config{
@@ -649,7 +746,7 @@ func TestSelectRouteUsesFreshS6cCacheHexMMENumberForSGdCandidate(t *testing.T) {
 	}
 }
 
-func TestDeliverSGdPrefersDestinationMMENumberAsSCAddress(t *testing.T) {
+func TestDeliverSGdUsesConfiguredSCAddressEvenWhenMMENumberPresent(t *testing.T) {
 	sgdSender := &fakeSGdSender{}
 	f := &Forwarder{
 		scAddr:    "15550000000",
@@ -795,5 +892,235 @@ func TestRetryDispatchPreservesTextPayloadForISC(t *testing.T) {
 	}
 	if len(st.statusUpdates) == 0 || st.statusUpdates[len(st.statusUpdates)-1] != store.MessageStatusDelivered {
 		t.Fatalf("final status = %v, want delivered", st.statusUpdates)
+	}
+}
+
+func TestRetryDispatchSkipsWhenMessageAlreadyClaimed(t *testing.T) {
+	st := &forwarderTestStore{claimBlocked: true}
+	reg := newTestRegistry(t, st)
+
+	simpleSender := &fakeSimpleSender{}
+	f := New(Config{
+		Registry:     reg,
+		Engine:       routing.NewEngine(),
+		Store:        st,
+		SimpleSender: simpleSender,
+	})
+	retries := NewRetryScheduler(f, time.Second)
+
+	retries.dispatch(context.Background(), store.Message{
+		ID:          "msg-claimed-1",
+		OriginIface: string(codec.InterfaceSMPP),
+		DstMSISDN:   "3342012860",
+		SrcMSISDN:   "3342012832",
+		Status:      store.MessageStatusWaitTimer,
+	})
+
+	if got := simpleSender.calls; got != 0 {
+		t.Fatalf("simple sender calls = %d, want 0", got)
+	}
+	if len(st.statusUpdates) != 0 {
+		t.Fatalf("status updates = %v, want none", st.statusUpdates)
+	}
+}
+
+func TestDispatchMarksSGdLookupDeferralForBuiltInSGdRoute(t *testing.T) {
+	st := &forwarderTestStore{}
+	reg := newTestRegistry(t, st)
+	s6cClient := &fakeS6cClient{info: &s6c.RoutingInfo{Attached: false}}
+	reg.SetS6cClient(s6cClient)
+
+	engine := routing.NewEngine()
+
+	f := New(Config{
+		Registry:         reg,
+		Engine:           engine,
+		Store:            st,
+		SGdSender:        &fakeSGdSender{},
+		MaxQueueLifetime: 2 * time.Hour,
+	})
+
+	f.Dispatch(context.Background(), &codec.Message{
+		ID:               "msg-sgd-defer-1",
+		IngressInterface: codec.InterfaceSMPP,
+		Source:           codec.Address{MSISDN: "3342012832"},
+		Destination:      codec.Address{MSISDN: "3342012860"},
+	})
+
+	if st.deferred == nil {
+		t.Fatal("expected deferred metadata to be recorded")
+	}
+	if got, want := st.deferred.reason, "sgd_lookup"; got != want {
+		t.Fatalf("deferred reason = %q, want %q", got, want)
+	}
+	if got, want := st.deferred.iface, string(codec.InterfaceSGd); got != want {
+		t.Fatalf("deferred interface = %q, want %q", got, want)
+	}
+	if got, want := st.deferred.routeCursor, 2; got != want {
+		t.Fatalf("deferred route cursor = %d, want %d", got, want)
+	}
+	if got, want := st.retryCount, 1; got != want {
+		t.Fatalf("retryCount = %d, want %d", got, want)
+	}
+	if got, want := st.routeCursor, 2; got != want {
+		t.Fatalf("scheduled route cursor = %d, want %d", got, want)
+	}
+	if st.expiryCapAt == nil {
+		t.Fatal("expected expiry cap to be recorded")
+	}
+	if delta := st.expiryCapAt.Sub(st.saved.SubmittedAt); delta < (2*time.Hour-time.Second) || delta > (2*time.Hour+time.Second) {
+		t.Fatalf("expiry cap delta = %v, want about 2h", delta)
+	}
+}
+
+func TestDispatchMarksSGdAlertWaitWhenMMEReturnsUnableToDeliver(t *testing.T) {
+	st := &forwarderTestStore{}
+	reg := newTestRegistry(t, st)
+	s6cClient := &fakeS6cClient{info: &s6c.RoutingInfo{
+		Attached:  true,
+		IMSI:      "311435300070599",
+		MMEName:   "mme01.example.net",
+		MMENumber: "15550000001",
+	}}
+	reg.SetS6cClient(s6cClient)
+
+	sgdSender := &fakeSGdSender{err: &diametersgd.OFAResultError{ResultCode: dcodec.DiameterUnableToDeliver}}
+	f := New(Config{
+		Registry:  reg,
+		Engine:    routing.NewEngine(),
+		Store:     st,
+		SGdSender: sgdSender,
+	})
+
+	f.Dispatch(context.Background(), &codec.Message{
+		ID:               "msg-sgd-wait-1",
+		IngressInterface: codec.InterfaceSMPP,
+		Source:           codec.Address{MSISDN: "3342012832"},
+		Destination:      codec.Address{MSISDN: "3342012860"},
+	})
+
+	if st.deferred == nil {
+		t.Fatal("expected deferred metadata to be recorded")
+	}
+	if got, want := st.deferred.reason, "sgd_delivery"; got != want {
+		t.Fatalf("deferred reason = %q, want %q", got, want)
+	}
+	if got, want := st.deferred.iface, string(codec.InterfaceSGd); got != want {
+		t.Fatalf("deferred interface = %q, want %q", got, want)
+	}
+	if len(st.statusUpdates) == 0 {
+		t.Fatal("expected status updates")
+	}
+	last := st.statusUpdates[len(st.statusUpdates)-1]
+	if last != store.MessageStatusWaitTimerEvent {
+		t.Fatalf("final status = %q, want %q", last, store.MessageStatusWaitTimerEvent)
+	}
+}
+
+func TestDispatchUsesSFPolicyMaxTTLOverGlobalQueueLifetime(t *testing.T) {
+	st := &forwarderTestStore{
+		sipPeers: map[string]store.SIPPeer{
+			"simple1": {Name: "simple1"},
+		},
+		sfPolicies: map[string]store.SFPolicy{
+			"policy-1": {
+				ID:     "policy-1",
+				Name:   "short",
+				MaxTTL: 15 * time.Minute,
+			},
+		},
+	}
+	reg := newTestRegistry(t, st)
+	engine := routing.NewEngine()
+	engine.Reload([]store.RoutingRule{
+		{
+			Name:           "simple",
+			Priority:       10,
+			MatchSrcIface:  "smpp",
+			MatchDstPrefix: "334",
+			EgressIface:    "sipsimple",
+			EgressPeer:     "simple1",
+			SFPolicyID:     "policy-1",
+		},
+	})
+
+	f := New(Config{
+		Registry:         reg,
+		Engine:           engine,
+		Store:            st,
+		SimpleSender:     &fakeSimpleSender{err: context.DeadlineExceeded},
+		MaxQueueLifetime: 7 * 24 * time.Hour,
+	})
+
+	f.Dispatch(context.Background(), &codec.Message{
+		ID:               "msg-policy-ttl-1",
+		IngressInterface: codec.InterfaceSMPP,
+		Source:           codec.Address{MSISDN: "3342012832"},
+		Destination:      codec.Address{MSISDN: "3342012860"},
+	})
+
+	if st.expiryCapAt == nil {
+		t.Fatal("expected expiry cap to be recorded")
+	}
+	if delta := st.expiryCapAt.Sub(st.saved.SubmittedAt); delta < (15*time.Minute-time.Second) || delta > (15*time.Minute+time.Second) {
+		t.Fatalf("expiry cap delta = %v, want about 15m", delta)
+	}
+}
+
+func TestDispatchAppliesSFPolicyVPOverrideToFallbackSend(t *testing.T) {
+	st := &forwarderTestStore{
+		sipPeers: map[string]store.SIPPeer{
+			"simple1": {Name: "simple1"},
+		},
+		sfPolicies: map[string]store.SFPolicy{
+			"policy-1": {
+				ID:         "policy-1",
+				Name:       "vp-short",
+				MaxTTL:     48 * time.Hour,
+				VPOverride: durationPtr(30 * time.Minute),
+			},
+		},
+	}
+	reg := newTestRegistry(t, st)
+	engine := routing.NewEngine()
+	engine.Reload([]store.RoutingRule{
+		{
+			Name:           "simple",
+			Priority:       10,
+			MatchSrcIface:  "smpp",
+			MatchDstPrefix: "334",
+			EgressIface:    "sipsimple",
+			EgressPeer:     "simple1",
+			SFPolicyID:     "policy-1",
+		},
+	})
+
+	simpleSender := &fakeSimpleSender{}
+	f := New(Config{
+		Registry:         reg,
+		Engine:           engine,
+		Store:            st,
+		SimpleSender:     simpleSender,
+		MaxQueueLifetime: 7 * 24 * time.Hour,
+	})
+
+	originalVP := 2 * time.Hour
+	f.Dispatch(context.Background(), &codec.Message{
+		ID:               "msg-vp-override-1",
+		IngressInterface: codec.InterfaceSMPP,
+		Source:           codec.Address{MSISDN: "3342012832"},
+		Destination:      codec.Address{MSISDN: "3342012860"},
+		ValidityPeriod:   &originalVP,
+	})
+
+	if got, want := simpleSender.calls, 1; got != want {
+		t.Fatalf("simple sender calls = %d, want %d", got, want)
+	}
+	if len(simpleSender.msgs) != 1 || simpleSender.msgs[0].ValidityPeriod == nil {
+		t.Fatal("expected captured message validity period")
+	}
+	got := *simpleSender.msgs[0].ValidityPeriod
+	if got < (30*time.Minute-time.Second) || got > (30*time.Minute+time.Second) {
+		t.Fatalf("captured validity period = %v, want about 30m", got)
 	}
 }

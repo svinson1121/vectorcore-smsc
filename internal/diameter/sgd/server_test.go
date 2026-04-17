@@ -1,6 +1,7 @@
 package sgd
 
 import (
+	"encoding/base64"
 	"testing"
 
 	"github.com/svinson1121/vectorcore-smsc/internal/diameter"
@@ -147,5 +148,34 @@ func TestAuthSessionStateFromRequestDefaultsToNoStateMaintained(t *testing.T) {
 	avp := authSessionStateFromRequest(nil)
 	if got, err := avp.Uint32(); err != nil || got != dcodec.AuthSessionStateNoStateMaintained {
 		t.Fatalf("default auth session state = (%d, %v), want (%d, nil)", got, err, dcodec.AuthSessionStateNoStateMaintained)
+	}
+}
+
+func TestParseAlertServiceCentreReadsCorrelationAndSCAddress(t *testing.T) {
+	msg := &dcodec.Message{
+		Header: dcodec.Header{CommandCode: dcodec.CmdAlertServiceCentre, AppID: dcodec.App3GPP_SGd},
+		AVPs: []*dcodec.AVP{
+			dcodec.NewString(dcodec.CodeSessionID, 0, dcodec.FlagMandatory, "smsc.example;123;alr"),
+			dcodec.NewString(dcodec.CodeOriginHost, 0, dcodec.FlagMandatory, "mme01.example.net"),
+			dcodec.NewString(dcodec.CodeOriginRealm, 0, dcodec.FlagMandatory, "example.net"),
+			dcodec.NewString(dcodec.CodeUserName, 0, dcodec.FlagMandatory, "311435000070570"),
+			dcodec.NewOctetString(dcodec.CodeMSISDN, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, encodeBCDMSISDN("3342012832")),
+			dcodec.NewOctetString(dcodec.CodeSCAddress, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, []byte("15550000000")),
+			dcodec.NewOctetString(dcodec.CodeSMSMICorrelationID, dcodec.Vendor3GPP, dcodec.FlagVendorSpecific, []byte("smsc:message-123")),
+		},
+	}
+
+	req, err := parseAlertServiceCentre(msg)
+	if err != nil {
+		t.Fatalf("parseAlertServiceCentre() error = %v", err)
+	}
+	if got, want := req.MSISDN, "3342012832"; got != want {
+		t.Fatalf("MSISDN = %q, want %q", got, want)
+	}
+	if got, want := req.SCAddress, "15550000000"; got != want {
+		t.Fatalf("SCAddress = %q, want %q", got, want)
+	}
+	if got, want := req.AlertCorrelationID, base64.StdEncoding.EncodeToString([]byte("smsc:message-123")); got != want {
+		t.Fatalf("AlertCorrelationID = %q, want %q", got, want)
 	}
 }

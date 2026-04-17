@@ -23,9 +23,14 @@ const (
 	CodeIPSMGWDeliveryOutcome     uint32 = 3320 // Grouped
 	CodeSMDeliveryCause           uint32 = 3321 // Enumerated
 	CodeAbsentUserDiagnosticSM    uint32 = 3322 // Unsigned32
+	CodeAlertReason               uint32 = 1434 // Enumerated
+	CodeRDRFlags                  uint32 = 3323 // Unsigned32
+	CodeSMSMICorrelationID        uint32 = 3324 // OctetString
 	CodeIPSMGWNumber              uint32 = 3327 // OctetString
 	CodeIPSMGWName                uint32 = 3328 // DiameterIdentity
+	CodeMaximumUEAvailabilityTime uint32 = 3329 // Time
 	CodeIPSMGWRealm               uint32 = 3329 // DiameterIdentity
+	CodeSMSGMSCAlertEvent         uint32 = 3333 // Unsigned32
 )
 
 const (

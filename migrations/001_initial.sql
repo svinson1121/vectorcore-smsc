@@ -82,7 +82,7 @@ CREATE TABLE routing_rules (
     match_dst_prefix TEXT,
     match_msisdn_min TEXT,
     match_msisdn_max TEXT,
-    egress_iface     TEXT NOT NULL CHECK (egress_iface IN ('sip3gpp','sipsimple','smpp','sgd')),
+    egress_iface     TEXT NOT NULL CHECK (egress_iface IN ('sip3gpp','sipsimple','smpp')),
     egress_peer      TEXT,
     sf_policy_id     UUID REFERENCES sf_policies(id),
     enabled          BOOLEAN NOT NULL DEFAULT true,
@@ -130,12 +130,16 @@ CREATE TABLE messages (
     route_cursor     INT NOT NULL DEFAULT 0,
     src_msisdn       TEXT,
     dst_msisdn       TEXT,
+    alert_correlation_id    TEXT,
+    deferred_reason         TEXT,
+    deferred_interface      TEXT,
+    serving_node_at_deferral TEXT,
     payload          BYTEA,
     udh              BYTEA,
     encoding         SMALLINT,
     dcs              SMALLINT,
     status           TEXT NOT NULL DEFAULT 'QUEUED'
-                         CHECK (status IN ('QUEUED','DISPATCHED','DELIVERED','FAILED','EXPIRED')),
+                         CHECK (status IN ('QUEUED','DISPATCHED','WAIT_TIMER','WAIT_EVENT','WAIT_TIMER_EVENT','DELIVERED','FAILED','EXPIRED')),
     retry_count      INT NOT NULL DEFAULT 0,
     next_retry_at    TIMESTAMPTZ,
     dr_required      BOOLEAN NOT NULL DEFAULT false,
@@ -172,8 +176,9 @@ CREATE TABLE delivery_reports (
 -- Indexes
 CREATE INDEX idx_messages_status          ON messages (status);
 CREATE INDEX idx_messages_dst_msisdn      ON messages (dst_msisdn);
-CREATE INDEX idx_messages_next_retry_at   ON messages (next_retry_at) WHERE status = 'QUEUED';
-CREATE INDEX idx_messages_expiry_at       ON messages (expiry_at)     WHERE status = 'QUEUED';
+CREATE INDEX idx_messages_alert_corr      ON messages (alert_correlation_id);
+CREATE INDEX idx_messages_next_retry_at   ON messages (next_retry_at) WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_TIMER_EVENT');
+CREATE INDEX idx_messages_expiry_at       ON messages (expiry_at)     WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_EVENT','WAIT_TIMER_EVENT');
 CREATE INDEX idx_ims_registrations_msisdn ON ims_registrations (msisdn);
 CREATE INDEX idx_subscribers_msisdn       ON subscribers (msisdn);
 

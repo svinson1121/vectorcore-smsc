@@ -2,8 +2,11 @@ package isc
 
 import (
 	"testing"
+	"time"
 
 	"github.com/emiago/sipgo/sip"
+	"github.com/svinson1121/vectorcore-smsc/internal/codec"
+	"github.com/svinson1121/vectorcore-smsc/internal/codec/sip3gpp"
 )
 
 func TestBuildSubmitReportRequestIncludesInReplyToAndRPAck(t *testing.T) {
@@ -96,6 +99,60 @@ func TestHandleInvokesOnResultForRPAck(t *testing.T) {
 	if tx.last == nil || tx.last.StatusCode != sip.StatusOK {
 		t.Fatalf("unexpected response: %#v", tx.last)
 	}
+}
+
+func TestHandleRespondsBeforeOnMessageCompletes(t *testing.T) {
+	var target sip.Uri
+	if err := sip.ParseUri("sip:3342012834@ims.mnc435.mcc311.3gppnetwork.org", &target); err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	req := sip.NewRequest(sip.MESSAGE, target)
+	req.AppendHeader(&sip.ViaHeader{Params: sip.NewParams(), Host: "10.90.250.52", Port: 5060, Transport: "UDP"})
+	req.AppendHeader(&sip.FromHeader{Address: target, Params: sip.NewParams()})
+	req.AppendHeader(&sip.ToHeader{Address: target, Params: sip.NewParams()})
+	callID := sip.CallIDHeader("reply-test")
+	req.AppendHeader(&callID)
+	req.AppendHeader(&sip.CSeqHeader{SeqNo: 1, MethodName: sip.MESSAGE})
+	req.AppendHeader(sip.NewHeader("Content-Type", "application/vnd.3gpp.sms"))
+	body, err := sip3gpp.EncodeMO(&codec.Message{
+		Source: codec.Address{
+			MSISDN: "3342012860",
+		},
+		Destination: codec.Address{
+			MSISDN: "3342012832",
+		},
+		Text:     "hello",
+		Encoding: codec.EncodingGSM7,
+	}, 0x01, "+15550000000")
+	if err != nil {
+		t.Fatalf("EncodeMO: %v", err)
+	}
+	req.SetBody(body)
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	tx := &stubServerTx{}
+
+	msgHandler := &MessageHandler{
+		OnMessage: func(_ *codec.Message) {
+			started <- struct{}{}
+			<-release
+		},
+	}
+
+	msgHandler.Handle(req, tx)
+
+	if tx.last == nil || tx.last.StatusCode != sip.StatusOK {
+		t.Fatalf("unexpected response: %#v", tx.last)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("OnMessage was not invoked asynchronously")
+	}
+
+	close(release)
 }
 
 type stubServerTx struct {

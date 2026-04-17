@@ -29,8 +29,9 @@ type LogConfig struct {
 }
 
 type SMSCConfig struct {
-	Address              string `yaml:"address"`                 // SMSC E.164 / GT — used across all interfaces
-	SGdSCAddressEncoding string `yaml:"sgd_sc_address_encoding"` // tbcd | ascii_digits
+	Address              string        `yaml:"address"`                 // SMSC E.164 / GT — used across all interfaces
+	SGdSCAddressEncoding string        `yaml:"sgd_sc_address_encoding"` // tbcd | ascii_digits
+	MaxQueueLifetime     time.Duration `yaml:"max_queue_lifetime"`      // global max queued/waiting lifetime
 }
 
 type SMPPConfig struct {
@@ -118,6 +119,9 @@ func Load(path string) (*Config, error) {
 func (c *Config) applyDefaults() {
 	if c.SMSC.SGdSCAddressEncoding == "" {
 		c.SMSC.SGdSCAddressEncoding = "tbcd"
+	}
+	if c.SMSC.MaxQueueLifetime == 0 {
+		c.SMSC.MaxQueueLifetime = 7 * 24 * time.Hour
 	}
 	// Build Listen addresses from address+port fields when provided.
 	if c.SMPP.Server.Address != "" || c.SMPP.Server.Port != 0 {

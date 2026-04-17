@@ -1,9 +1,11 @@
 package s6c
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/svinson1121/vectorcore-smsc/internal/diameter"
 	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
@@ -73,16 +75,39 @@ func parseAlertServiceCentre(msg *dcodec.Message) (AlertServiceCentreRequest, er
 		SessionID:   parseStringAVP(msg, dcodec.CodeSessionID, 0),
 		OriginHost:  parseStringAVP(msg, dcodec.CodeOriginHost, 0),
 		OriginRealm: parseStringAVP(msg, dcodec.CodeOriginRealm, 0),
-		IMSI:        parseStringAVP(msg, dcodec.CodeUserName, 0),
 	}
 	if req.SessionID == "" {
 		return AlertServiceCentreRequest{}, fmt.Errorf("missing Session-Id")
 	}
+	req.IMSI, req.MSISDN = parseUserIdentifier(msg)
+	if req.IMSI == "" {
+		req.IMSI = parseStringAVP(msg, dcodec.CodeUserName, 0)
+	}
 	if scAddr := msg.FindAVP(dcodec.CodeSCAddressS6c, dcodec.Vendor3GPP); scAddr != nil {
 		req.SCAddress = decodeTBCD(scAddr.Data)
 	}
-	if msisdn := msg.FindAVP(dcodec.CodeMSISDN, dcodec.Vendor3GPP); msisdn != nil {
-		req.MSISDN = decodeTBCD(msisdn.Data)
+	if req.MSISDN == "" {
+		if msisdn := msg.FindAVP(dcodec.CodeMSISDN, dcodec.Vendor3GPP); msisdn != nil {
+			req.MSISDN = decodeTBCD(msisdn.Data)
+		}
+	}
+	if corr := msg.FindAVP(dcodec.CodeSMSMICorrelationID, dcodec.Vendor3GPP); corr != nil && len(corr.Data) > 0 {
+		req.AlertCorrelationID = base64.StdEncoding.EncodeToString(corr.Data)
+	}
+	if alertReason := msg.FindAVP(dcodec.CodeAlertReason, dcodec.Vendor3GPP); alertReason != nil {
+		req.AlertReason, _ = alertReason.Uint32()
+	}
+	if servingNode := msg.FindAVP(dcodec.CodeServingNode, dcodec.Vendor3GPP); servingNode != nil {
+		req.ServingNode = parseServingNodeMME(servingNode)
+	}
+	if maxAvail := msg.FindAVP(dcodec.CodeMaximumUEAvailabilityTime, dcodec.Vendor3GPP); maxAvail != nil && len(maxAvail.Data) == 4 {
+		if secs, err := maxAvail.Uint32(); err == nil {
+			t := decodeDiameterTime(secs)
+			req.MaximumUEAvailabilityTime = &t
+		}
+	}
+	if alertEvent := msg.FindAVP(dcodec.CodeSMSGMSCAlertEvent, dcodec.Vendor3GPP); alertEvent != nil {
+		req.SMSGMSCAlertEvent, _ = alertEvent.Uint32()
 	}
 	if diag := msg.FindAVP(dcodec.CodeAbsentUserDiagnosticSM, dcodec.Vendor3GPP); diag != nil {
 		req.AbsentUserDiagnosticSM, _ = diag.Uint32()
@@ -121,6 +146,77 @@ func parseStringAVP(msg *dcodec.Message, code, vendorID uint32) string {
 		return ""
 	}
 	return string(avp.Data)
+}
+
+func parseUserIdentifier(msg *dcodec.Message) (imsi, msisdn string) {
+	uid := msg.FindAVP(dcodec.CodeUserIdentifier, dcodec.Vendor3GPP)
+	if uid == nil {
+		return "", ""
+	}
+	children, err := dcodec.DecodeGrouped(uid)
+	if err != nil {
+		return "", ""
+	}
+	for _, child := range children {
+		switch {
+		case child.Code == dcodec.CodeUserName && child.VendorID == 0:
+			if val, err := child.String(); err == nil {
+				imsi = val
+			}
+		case child.Code == dcodec.CodeMSISDN && child.VendorID == dcodec.Vendor3GPP:
+			msisdn = decodeTBCD(child.Data)
+		}
+	}
+	return imsi, msisdn
+}
+
+func buildUserIdentifier(imsi, msisdn string) *dcodec.AVP {
+	children := make([]*dcodec.AVP, 0, 2)
+	if imsi != "" {
+		children = append(children, dcodec.NewString(dcodec.CodeUserName, 0, dcodec.FlagMandatory, imsi))
+	}
+	if msisdn != "" {
+		children = append(children, dcodec.NewOctetString(dcodec.CodeMSISDN, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, encodeTBCD(msisdn)))
+	}
+	if len(children) == 0 {
+		return nil
+	}
+	uid, err := dcodec.NewGrouped(dcodec.CodeUserIdentifier, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, children)
+	if err != nil {
+		return nil
+	}
+	return uid
+}
+
+func decodeAlertCorrelationID(encoded string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(encoded)
+}
+
+func decodeDiameterTime(v uint32) time.Time {
+	const diameterTimeOffset = 2208988800
+	if v <= diameterTimeOffset {
+		return time.Unix(0, 0).UTC()
+	}
+	return time.Unix(int64(v-diameterTimeOffset), 0).UTC()
+}
+
+func parseServingNodeMME(avp *dcodec.AVP) string {
+	if avp == nil {
+		return ""
+	}
+	children, err := dcodec.DecodeGrouped(avp)
+	if err != nil {
+		return ""
+	}
+	for _, child := range children {
+		if child.Code == dcodec.CodeMMEName && child.VendorID == dcodec.Vendor3GPP {
+			if val, err := child.String(); err == nil {
+				return val
+			}
+			return string(child.Data)
+		}
+	}
+	return ""
 }
 
 func encodeTBCD(msisdn string) []byte {

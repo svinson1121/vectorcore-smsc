@@ -11,17 +11,19 @@ import (
 
 func (db *DB) SaveMessage(ctx context.Context, msg store.Message) error {
 	const q = `
-		INSERT INTO messages (
-			id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-			egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
-			payload, udh, encoding, dcs, status, retry_count,
-			next_retry_at, dr_required, submitted_at, expiry_at
-		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20
-		)`
+			INSERT INTO messages (
+				id, tp_mr, smpp_msgid, origin_iface, origin_peer,
+				egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+				alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
+				payload, udh, encoding, dcs, status, retry_count,
+				next_retry_at, dr_required, submitted_at, expiry_at
+			) VALUES (
+				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24
+			)`
 	_, err := db.pool.Exec(ctx, q,
 		msg.ID, msg.TPMR, msg.SMPPMsgID, msg.OriginIface, msg.OriginPeer,
 		msg.EgressIface, msg.EgressPeer, msg.RouteCursor, msg.SrcMSISDN, msg.DstMSISDN,
+		msg.AlertCorrelationID, msg.DeferredReason, msg.DeferredInterface, msg.ServingNodeAtDeferral,
 		msg.Payload, msg.UDH, msg.Encoding, msg.DCS, msg.Status,
 		msg.RetryCount, msg.NextRetryAt, msg.DRRequired, msg.SubmittedAt,
 		msg.ExpiryAt,
@@ -38,6 +40,18 @@ func (db *DB) UpdateMessageRouting(ctx context.Context, id, egressIface, egressP
 		id, egressIface, egressPeer)
 	if err != nil {
 		return fmt.Errorf("update message routing %s: %w", id, err)
+	}
+	return nil
+}
+
+func (db *DB) UpdateMessageDeferred(ctx context.Context, id, deferredReason, deferredInterface, servingNodeAtDeferral string, routeCursor int) error {
+	_, err := db.pool.Exec(ctx,
+		`UPDATE messages
+		    SET deferred_reason=$2, deferred_interface=$3, serving_node_at_deferral=$4, route_cursor=$5
+		  WHERE id=$1`,
+		id, deferredReason, deferredInterface, servingNodeAtDeferral, routeCursor)
+	if err != nil {
+		return fmt.Errorf("update message deferred %s: %w", id, err)
 	}
 	return nil
 }
@@ -59,24 +73,82 @@ func (db *DB) UpdateMessageStatus(ctx context.Context, id, status string) error 
 	return nil
 }
 
+func (db *DB) ClaimMessageForDispatch(ctx context.Context, id string, allowedStatuses []string) (bool, error) {
+	if len(allowedStatuses) == 0 {
+		return false, nil
+	}
+	args := make([]any, 0, len(allowedStatuses)+2)
+	args = append(args, id, store.MessageStatusDispatched)
+	placeholders := make([]string, 0, len(allowedStatuses))
+	for i, status := range allowedStatuses {
+		placeholders = append(placeholders, fmt.Sprintf("$%d", i+3))
+		args = append(args, status)
+	}
+	q := `UPDATE messages SET status=$2 WHERE id=$1 AND status IN (` + strings.Join(placeholders, ",") + `)`
+	tag, err := db.pool.Exec(ctx, q, args...)
+	if err != nil {
+		return false, fmt.Errorf("claim message for dispatch %s: %w", id, err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (db *DB) UpdateMessageRetry(ctx context.Context, id string, retryCount int, nextRetryAt time.Time, routeCursor int) error {
 	_, err := db.pool.Exec(ctx,
 		`UPDATE messages SET status=$2, retry_count=$3, next_retry_at=$4, route_cursor=$5 WHERE id=$1`,
-		id, store.MessageStatusQueued, retryCount, nextRetryAt, routeCursor)
+		id, store.MessageStatusWaitTimer, retryCount, nextRetryAt, routeCursor)
 	if err != nil {
 		return fmt.Errorf("update message retry %s: %w", id, err)
 	}
 	return nil
 }
 
+func (db *DB) UpdateMessageExpiryCap(ctx context.Context, id string, expiryAt time.Time) error {
+	_, err := db.pool.Exec(ctx,
+		`UPDATE messages
+		    SET expiry_at = CASE
+		        WHEN expiry_at IS NULL OR expiry_at > $2 THEN $2
+		        ELSE expiry_at
+		    END
+		  WHERE id=$1`,
+		id, expiryAt)
+	if err != nil {
+		return fmt.Errorf("update message expiry cap %s: %w", id, err)
+	}
+	return nil
+}
+
+func (db *DB) RequeueMessageForAlert(ctx context.Context, id string, nextRetryAt time.Time, routeCursor int, deferredReason string, allowedStatuses []string) (bool, error) {
+	if len(allowedStatuses) == 0 {
+		return false, nil
+	}
+	args := make([]any, 0, len(allowedStatuses)+6)
+	args = append(args, id, store.MessageStatusWaitTimer, nextRetryAt, routeCursor, deferredReason, deferredReason)
+	placeholders := make([]string, 0, len(allowedStatuses))
+	for i, status := range allowedStatuses {
+		placeholders = append(placeholders, fmt.Sprintf("$%d", i+7))
+		args = append(args, status)
+	}
+	q := `UPDATE messages
+		SET status=$2, next_retry_at=$3, route_cursor=$4,
+		    deferred_reason=CASE WHEN $5 <> '' THEN $6 ELSE deferred_reason END
+		WHERE id=$1 AND status IN (` + strings.Join(placeholders, ",") + `)`
+	tag, err := db.pool.Exec(ctx, q, args...)
+	if err != nil {
+		return false, fmt.Errorf("requeue message for alert %s: %w", id, err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (db *DB) ListRetryableMessages(ctx context.Context) ([]store.Message, error) {
 	const q = `
-		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
-		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-		       dr_required, submitted_at, expiry_at
+			SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
+			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
+			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
+			       dr_required, submitted_at, expiry_at
 		FROM messages
-		WHERE status = 'QUEUED' AND (next_retry_at IS NULL OR next_retry_at <= now())
+		WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_TIMER_EVENT')
+		  AND (next_retry_at IS NULL OR next_retry_at <= now())
 		ORDER BY next_retry_at ASC NULLS FIRST
 		LIMIT 100`
 	return scanMessages(db, ctx, q)
@@ -84,22 +156,25 @@ func (db *DB) ListRetryableMessages(ctx context.Context) ([]store.Message, error
 
 func (db *DB) ListExpiredMessages(ctx context.Context) ([]store.Message, error) {
 	const q = `
-		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
-		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-		       dr_required, submitted_at, expiry_at
+			SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
+			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
+			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
+			       dr_required, submitted_at, expiry_at
 		FROM messages
-		WHERE status = 'QUEUED' AND expiry_at IS NOT NULL AND expiry_at <= now()
+		WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_EVENT','WAIT_TIMER_EVENT')
+		  AND expiry_at IS NOT NULL AND expiry_at <= now()
 		LIMIT 100`
 	return scanMessages(db, ctx, q)
 }
 
 func (db *DB) GetMessage(ctx context.Context, id string) (*store.Message, error) {
 	const q = `
-		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
-		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-		       dr_required, submitted_at, expiry_at
+			SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
+			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
+			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
+			       dr_required, submitted_at, expiry_at
 		FROM messages WHERE id = $1`
 	msgs, err := scanMessages(db, ctx, q, id)
 	if err != nil {
@@ -129,17 +204,58 @@ func scanMessages(db *DB, ctx context.Context, q string, args ...any) ([]store.M
 	var msgs []store.Message
 	for rows.Next() {
 		var m store.Message
+		var smppMsgID *string
+		var originPeer *string
+		var egressIface *string
+		var egressPeer *string
+		var srcMSISDN *string
+		var dstMSISDN *string
+		var alertCorrelationID *string
+		var deferredReason *string
+		var deferredInterface *string
+		var servingNodeAtDeferral *string
 		var encoding *int
 		var dcs *int
 		err := rows.Scan(
-			&m.ID, &m.TPMR, &m.SMPPMsgID, &m.OriginIface, &m.OriginPeer,
-			&m.EgressIface, &m.EgressPeer, &m.RouteCursor, &m.SrcMSISDN, &m.DstMSISDN,
+			&m.ID, &m.TPMR, &smppMsgID, &m.OriginIface, &originPeer,
+			&egressIface, &egressPeer, &m.RouteCursor, &srcMSISDN, &dstMSISDN,
+			&alertCorrelationID, &deferredReason, &deferredInterface, &servingNodeAtDeferral,
 			&m.Payload, &m.UDH, &encoding, &dcs, &m.Status,
 			&m.RetryCount, &m.NextRetryAt,
 			&m.DRRequired, &m.SubmittedAt, &m.ExpiryAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
+		}
+		if smppMsgID != nil {
+			m.SMPPMsgID = *smppMsgID
+		}
+		if originPeer != nil {
+			m.OriginPeer = *originPeer
+		}
+		if egressIface != nil {
+			m.EgressIface = *egressIface
+		}
+		if egressPeer != nil {
+			m.EgressPeer = *egressPeer
+		}
+		if srcMSISDN != nil {
+			m.SrcMSISDN = *srcMSISDN
+		}
+		if dstMSISDN != nil {
+			m.DstMSISDN = *dstMSISDN
+		}
+		if alertCorrelationID != nil {
+			m.AlertCorrelationID = *alertCorrelationID
+		}
+		if deferredReason != nil {
+			m.DeferredReason = *deferredReason
+		}
+		if deferredInterface != nil {
+			m.DeferredInterface = *deferredInterface
+		}
+		if servingNodeAtDeferral != nil {
+			m.ServingNodeAtDeferral = *servingNodeAtDeferral
 		}
 		if encoding != nil {
 			m.Encoding = *encoding
@@ -176,10 +292,11 @@ func (db *DB) ListMessages(ctx context.Context, limit int) ([]store.Message, err
 		limit = 100
 	}
 	const q = `
-		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
-		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-		       dr_required, submitted_at, expiry_at
+			SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
+			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
+			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
+			       dr_required, submitted_at, expiry_at
 	FROM messages ORDER BY submitted_at DESC LIMIT $1`
 	return scanMessages(db, ctx, q, limit)
 }
@@ -223,12 +340,23 @@ func (db *DB) ListFilteredMessages(ctx context.Context, filter store.MessageFilt
 		args = append(args, "%"+filter.OriginPeer+"%")
 		nextArg++
 	}
+	if filter.AlertCorrelationID != "" {
+		conds = append(conds, fmt.Sprintf("alert_correlation_id = $%d", nextArg))
+		args = append(args, filter.AlertCorrelationID)
+		nextArg++
+	}
+	if filter.DeferredInterface != "" {
+		conds = append(conds, fmt.Sprintf("deferred_interface = $%d", nextArg))
+		args = append(args, filter.DeferredInterface)
+		nextArg++
+	}
 
 	q := `
-		SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
-		       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
-		       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-		       dr_required, submitted_at, expiry_at
+			SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
+			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
+			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
+			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
+			       dr_required, submitted_at, expiry_at
 		FROM messages`
 	if len(conds) > 0 {
 		q += "\n\t\tWHERE " + strings.Join(conds, " AND ")

@@ -48,10 +48,11 @@ func (e *Engine) Reload(rules []store.RoutingRule) {
 //
 // The decision tree is:
 //  1. IMS-registered → EgressIface=sip3gpp  (handled by forwarder, not here)
-//  2. LTE-attached   → EgressIface=sgd       (handled by forwarder, not here)
-//  3. Routing rules  → first match wins
+//  2. IMS via Sh     → handled by forwarder, not here
+//  3. LTE-attached   → EgressIface=sgd       (handled by forwarder, not here)
+//  4. Routing rules  → fallback routes only
 //
-// Route only handles step 3; steps 1 and 2 are checked by the Forwarder
+// Route only handles step 4; steps 1-3 are checked by the Forwarder
 // before calling Route, since they require live registry/subscriber lookups.
 func (e *Engine) Route(msg *codec.Message) (*Decision, error) {
 	decisions, err := e.RouteAll(msg)

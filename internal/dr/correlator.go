@@ -26,7 +26,7 @@ type SMPPRegistry interface {
 
 // S6cReporter sends terminal MT outcomes to the HSS over S6c.
 type S6cReporter interface {
-	ReportDelivery(msisdn, imsi, scAddr string, cause uint32, diagnostic *uint32) (*s6cdiam.ReportDeliveryResult, error)
+	ReportDelivery(msisdn, imsi, scAddr, alertCorrelationID string, cause uint32, diagnostic *uint32) (*s6cdiam.ReportDeliveryResult, error)
 }
 
 // Correlator generates delivery reports for delivered or failed messages
@@ -108,7 +108,7 @@ func (c *Correlator) reportS6c(ctx context.Context, m store.Message, status stri
 		imsi = sub.IMSI
 	}
 
-	if _, err := c.s6c.ReportDelivery(m.DstMSISDN, imsi, c.scAddr, cause, nil); err != nil {
+	if _, err := c.s6c.ReportDelivery(m.DstMSISDN, imsi, c.scAddr, m.AlertCorrelationID, cause, nil); err != nil {
 		slog.Warn("correlator: S6c RSDS failed",
 			"id", m.ID,
 			"dst", m.DstMSISDN,

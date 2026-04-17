@@ -15,6 +15,7 @@ const (
 	CodeSMDeliveryOutcome     uint32 = 3316 // Grouped (vendor 10415)
 	CodeSMSGWDeliveryOutcome  uint32 = 3320 // Grouped IP-SM-GW-SM-Delivery-Outcome (vendor 10415)
 	CodeOFRFlags              uint32 = 3328 // Unsigned32 (vendor 10415)
+	CodeMaximumUEAvailability uint32 = 3329 // Time (vendor 10415)
 	CodeMaximumRetransmission uint32 = 3330 // Time (vendor 10415)
 	CodeRequestedRetransmTime uint32 = 3331 // Time (vendor 10415)
 

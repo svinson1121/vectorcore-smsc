@@ -58,7 +58,46 @@ func Open(ctx context.Context, dsn string) (*DB, error) {
 	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS udh BYTEA`)
 	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS encoding SMALLINT`)
 	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS route_cursor INT NOT NULL DEFAULT 0`)
+	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS alert_correlation_id TEXT`)
+	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS deferred_reason TEXT`)
+	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS deferred_interface TEXT`)
+	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS serving_node_at_deferral TEXT`)
 	pool.Exec(ctx, `ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS mme_number TEXT`)
+	pool.Exec(ctx, `UPDATE smpp_server_accounts
+		SET default_route_id = NULL
+		WHERE default_route_id IN (SELECT id FROM routing_rules WHERE egress_iface = 'sgd')`)
+	pool.Exec(ctx, `DELETE FROM routing_rules WHERE egress_iface = 'sgd'`)
+	pool.Exec(ctx, `DO $$
+BEGIN
+	IF EXISTS (
+		SELECT 1 FROM pg_constraint
+		WHERE conrelid = 'messages'::regclass
+		  AND conname = 'messages_status_check'
+	) THEN
+		ALTER TABLE messages DROP CONSTRAINT messages_status_check;
+	END IF;
+	ALTER TABLE messages
+		ADD CONSTRAINT messages_status_check
+		CHECK (status IN ('QUEUED','DISPATCHED','WAIT_TIMER','WAIT_EVENT','WAIT_TIMER_EVENT','DELIVERED','FAILED','EXPIRED'));
+END $$`)
+	pool.Exec(ctx, `DO $$
+BEGIN
+	IF EXISTS (
+		SELECT 1 FROM pg_constraint
+		WHERE conrelid = 'routing_rules'::regclass
+		  AND conname = 'routing_rules_egress_iface_check'
+	) THEN
+		ALTER TABLE routing_rules DROP CONSTRAINT routing_rules_egress_iface_check;
+	END IF;
+	ALTER TABLE routing_rules
+		ADD CONSTRAINT routing_rules_egress_iface_check
+		CHECK (egress_iface IN ('sip3gpp','sipsimple','smpp'));
+END $$`)
+	pool.Exec(ctx, `DROP INDEX IF EXISTS idx_messages_next_retry_at`)
+	pool.Exec(ctx, `DROP INDEX IF EXISTS idx_messages_expiry_at`)
+	pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_messages_alert_corr ON messages (alert_correlation_id)`)
+	pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_messages_next_retry_at ON messages (next_retry_at) WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_TIMER_EVENT')`)
+	pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_messages_expiry_at ON messages (expiry_at) WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_EVENT','WAIT_TIMER_EVENT')`)
 	// Crash recovery: messages stuck in DISPATCHED state (server died mid-send)
 	// are reset to QUEUED so the retry scheduler re-attempts them.
 	pool.Exec(ctx, `UPDATE messages SET status='QUEUED', next_retry_at=now() WHERE status='DISPATCHED'`)

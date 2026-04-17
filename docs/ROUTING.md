@@ -1,41 +1,50 @@
 # Routing Logic
 
-This document describes the real routing behavior used by the forwarder and routing engine.
+This document describes the current routing behavior implemented by the SMSC forwarder.
 
 ## High-Level Flow
 
 Every inbound message goes through:
 
 1. Ingress decode to canonical `codec.Message`
-2. Forwarder egress selection
-3. Persist + dispatch attempt
-4. Success finalize or retry scheduling
+2. Persist as a queued message
+3. Single routing pass across built-in and fallback candidates
+4. Finalize as `DELIVERED`, `WAIT_TIMER`, `WAIT_EVENT`, `WAIT_TIMER_EVENT`, `FAILED`, or later `EXPIRED`
 
-## Egress Selection Precedence
+## Built-In Route Order
 
-The forwarder chooses egress in this order:
+The forwarder evaluates MT delivery in this order:
 
-1. IMS registration check (Sh lookup)
-- If destination MSISDN is currently IMS-registered, route to:
-  - `egress_iface = sip3gpp`
-  - `egress_peer = registration.s_cscf`
+1. `ims-local`
+   - use locally cached IMS registration
+   - route to `sip3gpp` if the subscriber is already registered locally
 
-2. LTE attach check (subscriber state)
-- If subscriber exists with `lte_attached=true` and `mme_host` set, route to:
-  - `egress_iface = sgd`
-  - `egress_peer = mme_host`
+2. `ims-sh`
+   - use a live `Sh` lookup
+   - route to `sip3gpp` if the subscriber is IMS-registered via `Sh`
+   - skipped if no usable `Sh` Diameter path exists
 
-3. Routing rules engine
-- Evaluate configured rules in priority order (lowest number first)
-- First match wins
-- Use rule-defined:
-  - `egress_iface`
-  - `egress_peer`
-  - `sf_policy_id`
+3. `sgd`
+   - built-in route, not a routing rule
+   - uses `S6c` lookup to get serving MME state, then applies the existing `S6c -> SGd` MME mapping logic, then sends over `SGd`
+   - skipped unless both required Diameter capabilities are usable:
+     - `S6c`
+     - `SGd`
 
-If no decision is found, message is persisted as `FAILED`.
+4. Fallback routing rules
+   - evaluated in priority order
+   - only `smpp` and `sipsimple` are valid routing-rule egress interfaces
 
-## Rule Matching
+## Routing Rules
+
+Routing rules are now fallback-only policy.
+
+Valid `egress_iface` values:
+
+- `smpp`
+- `sipsimple`
+
+`sgd` is no longer a routing-rule option. Legacy `sgd` rules are treated as obsolete and are removed during startup migration/cleanup.
 
 A rule matches when all non-empty match fields pass:
 
@@ -46,46 +55,98 @@ A rule matches when all non-empty match fields pass:
 
 Notes:
 
-- Leading `+` is stripped before prefix/range comparisons.
-- Range comparison is string comparison on normalized MSISDN digits.
-- Rules are hot-reloaded from DB when `routing_rules` changes.
+- leading `+` is stripped before prefix/range comparisons
+- range comparison is string comparison on normalized MSISDN digits
+- rules are hot-reloaded from DB when `routing_rules` changes
 
-## Persistence and Dispatch Lifecycle
+## Message State Model
 
-For each message:
+Persisted message statuses are:
 
-1. Assign internal UUID if missing
-2. Save `messages` row as `QUEUED`
-3. Update status to `DISPATCHED`
-4. Attempt network delivery on selected egress
-5. On success, mark `DELIVERED`
-6. On failure, schedule retry (`next_retry_at`, `retry_count`)
+- `QUEUED`
+- `DISPATCHED`
+- `WAIT_TIMER`
+- `WAIT_EVENT`
+- `WAIT_TIMER_EVENT`
+- `DELIVERED`
+- `FAILED`
+- `EXPIRED`
+
+These are real stored statuses, not derived UI-only labels.
+
+## Routing Outcomes
+
+Each route attempt is classified internally as one of:
+
+- `DELIVERED`
+- `TRY_NEXT`
+- `WAIT_TIMER`
+- `WAIT_EVENT`
+- `ROUTE_PERMANENT`
+
+The pass finalization precedence is:
+
+1. any route delivers -> `DELIVERED`
+2. else any event wait -> `WAIT_EVENT` or `WAIT_TIMER_EVENT`
+3. else any timer-needed outcome -> `WAIT_TIMER`
+4. else -> `FAILED`
+
+Delivery is global. If a later route delivers, older deferred state is stale and later alert/timer wakeups are ignored.
+
+## Trigger Ownership
+
+Retry scheduler and alert-triggered wakeups use guarded store transitions:
+
+- retry can only claim messages still in retryable waiting states
+- alert requeue only updates messages still in queued/waiting states
+- stale `ALR` after delivery or after another worker has claimed the message is skipped
+
+This prevents timer and event triggers from dispatching the same message twice in parallel.
 
 ## Store-and-Forward Policies
 
-`sf_policy_id` from matched routing rule controls retry behavior.
+`sf_policy_id` from a matched fallback rule controls retry and lifetime behavior for that route.
 
 Policy fields:
 
 - `max_retries`
-- `retry_schedule` (seconds between attempts)
+- `retry_schedule`
 - `max_ttl`
 - optional `vp_override`
 
-If no policy is set, default retry schedule is used.
+Semantics:
+
+- `max_ttl` overrides the global `smsc.max_queue_lifetime` for that route when the message enters a waiting state
+- `vp_override` is currently future-capable for full wire-level validity handling; today it is used as an internal validity/lifetime hint rather than a guaranteed on-the-wire validity field across all MT routes
+- `vp_override` also acts as an earlier expiry cap for deferred queue lifetime if it is shorter than the other lifetime cap
+
+If no policy is set, the forwarder uses the built-in retry schedule and the global `smsc.max_queue_lifetime`.
+
+## Queue Lifetime
+
+Global queue lifetime is configured by:
+
+- `smsc.max_queue_lifetime`
+
+Current default:
+
+- `168h` (`7 days`)
+
+Expiry is capped from original submission time, not extended by retries.
 
 ## Queue Semantics in Metrics/UI
 
-Current queue depth is treated as in-flight backlog:
+Current queue depth is treated as backlog across active and waiting states:
 
-- `QUEUED + DISPATCHED`
-
-This is reflected in Prometheus queue gauge and dashboard queue card.
+- `QUEUED`
+- `DISPATCHED`
+- `WAIT_TIMER`
+- `WAIT_EVENT`
+- `WAIT_TIMER_EVENT`
 
 ## Egress Peer Semantics
 
-- `sip3gpp`: peer is managed by live IMS registration (`s_cscf`), UI peer field is informational
+- `sip3gpp`: peer is derived from IMS registration / `Sh`
 - `sipsimple`: peer name must exist in SIP peers table
-- `smpp`: peer name references SMPP outbound client session
-- `sgd`: peer name references Diameter SGd peer/MME host
-
+- `smpp`: peer name references an SMPP outbound client session
+- `sgd`: peer is derived from `S6c` serving-node data plus the SMSC's `S6c -> SGd` mapping logic

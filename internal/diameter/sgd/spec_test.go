@@ -129,7 +129,7 @@ func TestBuildOFRRequestIncludesRequiredAVPs(t *testing.T) {
 	}
 }
 
-func TestBuildOFRRequestUsesMMENumberAsSCAddressWhenProvided(t *testing.T) {
+func TestBuildOFRRequestUsesProvidedSCAddress(t *testing.T) {
 	canonical := &codec.Message{}
 	canonical.Source.MSISDN = "15551234567"
 	canonical.Destination.MSISDN = "3324108223"
@@ -138,7 +138,7 @@ func TestBuildOFRRequestUsesMMENumberAsSCAddressWhenProvided(t *testing.T) {
 	canonical.TPMR = 7
 	canonical.DCS = 0
 
-	avps, err := sgdcodec.EncodeOFR(canonical, canonical.Destination.MMENumber, "tbcd")
+	avps, err := sgdcodec.EncodeOFR(canonical, "+15550000000", "tbcd")
 	if err != nil {
 		t.Fatalf("EncodeOFR() error = %v", err)
 	}
@@ -148,7 +148,7 @@ func TestBuildOFRRequestUsesMMENumberAsSCAddressWhenProvided(t *testing.T) {
 	if scAddr == nil {
 		t.Fatal("missing SC-Address AVP")
 	}
-	want := []byte{0x51, 0x55, 0x00, 0x00, 0x00, 0xF1}
+	want := []byte{0x51, 0x55, 0x00, 0x00, 0x00, 0xF0}
 	if !bytes.Equal(scAddr.Data, want) {
 		t.Fatalf("SC-Address bytes = %x, want %x", scAddr.Data, want)
 	}
