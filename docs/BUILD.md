@@ -2,43 +2,65 @@
 
 ## Requirements
 
-- Linux environment (recommended)
-- Go `1.25.x` (project `go.mod` is `go 1.25.0`)
-- Node.js + npm (for UI build)
+- Linux environment recommended
+- Go `1.25.x`
+- Node.js + npm for the React UI build
 - `make`
 
 Optional/runtime dependencies:
 
-- SQLite (embedded driver used by default config) or PostgreSQL server
-- SCTP support if using Diameter SCTP transport
-- systemd if using `make install`
+- SQLite or PostgreSQL
+- SCTP support if you use Diameter over SCTP
+- systemd if you want service installation
 
-## Project Outputs
+## Outputs
 
 - Go binary: `bin/smsc`
-- Web UI static bundle: `web/dist/`
+- UI bundle: `web/dist/`
 
-## Quick Build
+The UI is embedded into the Go binary at build time. If the UI was not built when the binary was compiled, `/ui/` serves a placeholder page instead of the React app.
 
-From repository root:
+## Build
+
+Build everything:
 
 ```bash
 make
 ```
 
-This runs:
+Equivalent explicit steps:
 
-1. UI dependency install + UI production build (`web/dist`)
-2. Go build with version ldflags to `bin/smsc`
+```bash
+make ui
+make build
+```
+
+What this does:
+
+1. installs UI dependencies in `web/`
+2. builds the React bundle into `web/dist/`
+3. builds `bin/smsc` with the Makefile version string embedded via `-ldflags`
 
 ## Run Locally
 
+Use the sample config that exists in this repository:
+
 ```bash
-bin/smsc -d -c smsc.yaml
+bin/smsc -c config/smsc.yaml
 ```
 
+Useful flags:
+
 - `-d` enables debug logging
-- `-c` selects config file
+- `-v` prints the embedded version and exits
+- `-c` selects the config file
+
+Important path note:
+
+- the binary default is `-c config.yaml`
+- this source tree ships its sample config as `config/smsc.yaml`
+
+If you do not pass `-c config/smsc.yaml`, the binary will look for a root-level `config.yaml`.
 
 ## Test
 
@@ -52,7 +74,7 @@ Equivalent:
 go test ./...
 ```
 
-If cache path permissions are restricted, use:
+If cache permissions are restrictive in your environment:
 
 ```bash
 GOCACHE=/tmp/go-build-cache go test ./...
@@ -60,11 +82,17 @@ GOCACHE=/tmp/go-build-cache go test ./...
 
 ## UI Development
 
-Run backend separately, then start Vite dev server:
+Run the backend separately, then start the Vite dev server:
 
 ```bash
 make dev-ui
 ```
+
+The Vite server proxies:
+
+- `/api` to `http://localhost:8080`
+- `/metrics` to `http://localhost:8080`
+- `/health` to `http://localhost:8080`
 
 ## Clean
 
@@ -72,29 +100,45 @@ make dev-ui
 make clean
 ```
 
-Removes:
+This removes:
 
 - `bin/`
 - `web/dist/`
 
-## Install as Service (systemd)
+## Install As Service
+
+The shipped systemd unit runs:
 
 ```bash
-make install
+/opt/vectorcore/bin/smsc -c /opt/vectorcore/etc/smsc.yaml
 ```
 
-Installs binary/config/service unit and enables service.
+And `make install` is intended to:
 
-Uninstall:
+- install the binary under `/opt/vectorcore/bin/`
+- install the config under `/opt/vectorcore/etc/`
+- install `systemd/vectorcore-smsc.service`
+- enable and start the service
 
-```bash
-make uninstall
-```
+Current source-tree caveat:
+
+- the sample config in this repo is `config/smsc.yaml`
+- the current `make install` target copies `config.yaml`
+
+Before relying on `make install`, make sure you either:
+
+- provide a root-level `config.yaml`, or
+- adjust the install step to copy `config/smsc.yaml` into `/opt/vectorcore/etc/smsc.yaml`
 
 ## Configuration Notes
 
-- Main runtime config: `smsc.yaml`
-- SIP identity should be explicitly set with:
-  - `sip.fqdn: "smsc.ims.mnc435.mcc311.3gppnetwork.org"`
-- Default sample config also includes SMPP, Diameter, DB, API, and log sections.
+The sample config at `config/smsc.yaml` includes:
 
+- plain SMPP listener settings
+- optional inbound SMPP/TLS listener settings
+- optional outbound SMPP TLS CA settings
+- SIP listen identity and ISC header controls
+- Diameter transport and local identity
+- database driver and DSN
+- API listen address
+- log file and log level

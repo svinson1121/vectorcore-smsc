@@ -8,25 +8,34 @@ Primary API namespace:
 
 - `/api/v1`
 
+OpenAPI is the source of truth for schemas:
+
+- `GET /api/v1/openapi.json`
+- `GET /api/v1/docs`
+- `GET /api/v1/schemas/...`
+
 ## Operational Endpoints
 
 ### Status
 
 - `GET /api/v1/status`
+- `GET /api/v1/status/peers`
 
 ```bash
 curl -s http://localhost:8080/api/v1/status | jq
+curl -s http://localhost:8080/api/v1/status/peers | jq
 ```
 
-Sample response:
+Example `status` response:
 
 ```json
 {
-  "version": "0.0.1d",
+  "version": "0.4.0b",
   "uptime": "2m34s",
   "uptime_sec": 154.1,
+  "started_at": "2026-04-23T10:00:00Z",
   "message_counts": {
-    "queued": 0,
+    "queued": 1,
     "dispatched": 0,
     "delivered": 12,
     "failed": 1,
@@ -35,13 +44,7 @@ Sample response:
 }
 ```
 
-- `GET /api/v1/status/peers`
-
-```bash
-curl -s http://localhost:8080/api/v1/status/peers | jq
-```
-
-Sample response:
+Example `status/peers` response:
 
 ```json
 [
@@ -49,52 +52,60 @@ Sample response:
     "name": "msc0",
     "type": "smpp_client",
     "state": "BOUND",
+    "transport": "tcp",
     "system_id": "smsc",
     "bind_type": "transceiver",
     "remote_addr": "10.90.250.42:2775",
-    "connected_at": "2026-03-31T16:42:37Z"
+    "connected_at": "2026-04-23T10:01:00Z"
+  },
+  {
+    "name": "3342012832",
+    "type": "sip_ims",
+    "state": "REGISTERED",
+    "system_id": "sip:+3342012832@example.org",
+    "remote_addr": "sip:ue@10.0.0.44:5060",
+    "application": "scscf1.example.org",
+    "connected_at": "2026-04-23T10:02:00Z",
+    "expiry_at": "2026-04-23T10:32:00Z"
   }
 ]
 ```
 
-### Metrics and Health
+Peer `type` values currently emitted:
+
+- `smpp_server`
+- `smpp_client`
+- `diameter_peer`
+- `sip_ims`
+
+### Metrics, Health, and UI
 
 - `GET /metrics`
+- `GET /health`
+- `GET /ui/`
 
 ```bash
 curl -s http://localhost:8080/metrics
-```
-
-Sample excerpt:
-
-```text
-smsc_messages_in_total{interface="smpp"} 12
-smsc_messages_out_total{interface="sip3gpp"} 12
-smsc_store_forward_queued 0
-```
-
-- `GET /health`
-
-```bash
 curl -s http://localhost:8080/health
 ```
 
-Sample response:
+Example metric lines:
 
-```json
-{"status":"ok"}
+```text
+smsc_messages_in_total{interface="smpp"} 12
+smsc_messages_out_total{interface="sip3gpp"} 10
+smsc_store_forward_queued 2
+smsc_store_forward_retried_total 4
+smsc_diameter_peers_connected 1
 ```
 
-### OpenAPI
+If the UI bundle was not built before the binary was compiled, `/ui/` serves a placeholder page instead of the React SPA.
 
-- `GET /api/v1/openapi.json`
-- `GET /api/v1/docs`
+## Configuration Resources
 
-```bash
-curl -s http://localhost:8080/api/v1/openapi.json | jq '.info'
-```
+### SMPP Server Accounts
 
-## SMPP Server Accounts
+Endpoints:
 
 - `GET /api/v1/smpp/server/accounts`
 - `GET /api/v1/smpp/server/accounts/{id}`
@@ -102,24 +113,23 @@ curl -s http://localhost:8080/api/v1/openapi.json | jq '.info'
 - `PUT /api/v1/smpp/server/accounts/{id}`
 - `DELETE /api/v1/smpp/server/accounts/{id}`
 
-List sample response:
+Create/update fields:
 
-```json
-[
-  {
-    "id": "f3dc2f8e-1b0a-4f95-b851-9ab742e8d600",
-    "name": "test-account",
-    "system_id": "test",
-    "password_hash": "$2a$10$...",
-    "allowed_ip": "192.168.105.20",
-    "bind_type": "transceiver",
-    "throughput_limit": 0,
-    "enabled": true
-  }
-]
-```
+- `name`
+- `system_id`
+- `password`
+- `allowed_ip`
+- `bind_type`: `transmitter | receiver | transceiver`
+- `throughput_limit`
+- `enabled`
 
-Create:
+Notes:
+
+- plaintext `password` is hashed on save
+- password hashes are never returned by the API
+- delete returns `409` if the account is still referenced by a routing rule
+
+Example create:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/smpp/server/accounts \
@@ -135,23 +145,9 @@ curl -s -X POST http://localhost:8080/api/v1/smpp/server/accounts \
   }'
 ```
 
-Update:
+### SMPP Outbound Clients
 
-```bash
-curl -s -X PUT http://localhost:8080/api/v1/smpp/server/accounts/<id> \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name": "test-account",
-    "system_id": "test",
-    "password": "",
-    "allowed_ip": "",
-    "bind_type": "transceiver",
-    "throughput_limit": 10,
-    "enabled": true
-  }'
-```
-
-## SMPP Outbound Clients
+Endpoints:
 
 - `GET /api/v1/smpp/clients`
 - `GET /api/v1/smpp/clients/{id}`
@@ -159,7 +155,28 @@ curl -s -X PUT http://localhost:8080/api/v1/smpp/server/accounts/<id> \
 - `PUT /api/v1/smpp/clients/{id}`
 - `DELETE /api/v1/smpp/clients/{id}`
 
-List sample response:
+Create/update fields:
+
+- `name`
+- `host`
+- `port`
+- `transport`: `tcp | tls`
+- `verify_server_cert`
+- `system_id`
+- `password`
+- `bind_type`: `transmitter | receiver | transceiver`
+- `reconnect_interval`
+- `throughput_limit`
+- `enabled`
+
+Notes:
+
+- outbound client passwords are not returned by the API
+- `verify_server_cert` only matters when `transport` is `tls`
+- TLS CA configuration comes from `smpp.outbound_client_tls.server_ca_file`
+- delete returns `409` if the client is still referenced by a routing rule
+
+Example response:
 
 ```json
 [
@@ -168,8 +185,9 @@ List sample response:
     "name": "msc0",
     "host": "10.90.250.42",
     "port": 2775,
+    "transport": "tls",
+    "verify_server_cert": true,
     "system_id": "smsc",
-    "password": "secret",
     "bind_type": "transceiver",
     "reconnect_interval": "10s",
     "throughput_limit": 0,
@@ -178,25 +196,9 @@ List sample response:
 ]
 ```
 
-Create:
+### SIP SIMPLE Peers
 
-```bash
-curl -s -X POST http://localhost:8080/api/v1/smpp/clients \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name": "msc0",
-    "host": "10.90.250.42",
-    "port": 2775,
-    "system_id": "smsc",
-    "password": "secret",
-    "bind_type": "transceiver",
-    "reconnect_interval": "10s",
-    "throughput_limit": 0,
-    "enabled": true
-  }'
-```
-
-## SIP SIMPLE Peers
+Endpoints:
 
 - `GET /api/v1/sip/peers`
 - `GET /api/v1/sip/peers/{id}`
@@ -204,42 +206,25 @@ curl -s -X POST http://localhost:8080/api/v1/smpp/clients \
 - `PUT /api/v1/sip/peers/{id}`
 - `DELETE /api/v1/sip/peers/{id}`
 
-List sample response:
+Create/update fields:
 
-```json
-[
-  {
-    "id": "8f3e167f-8d31-4f2d-b7a7-0e2e9164a7a6",
-    "name": "site-b",
-    "address": "10.0.0.10",
-    "port": 5060,
-    "transport": "udp",
-    "domain": "example.org",
-    "auth_user": "",
-    "auth_pass": "",
-    "enabled": true
-  }
-]
-```
+- `name`
+- `address`
+- `port`
+- `transport`: `udp | tcp | tls`
+- `domain`
+- `auth_user`
+- `auth_pass`
+- `enabled`
 
-Create:
+Notes:
 
-```bash
-curl -s -X POST http://localhost:8080/api/v1/sip/peers \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name": "site-b",
-    "address": "10.0.0.10",
-    "port": 5060,
-    "transport": "udp",
-    "domain": "example.org",
-    "auth_user": "",
-    "auth_pass": "",
-    "enabled": true
-  }'
-```
+- `auth_pass` is accepted on write but never returned on read
+- delete returns `409` if the peer is still referenced by a routing rule
 
-## Diameter Peers
+### Diameter Peers
+
+Endpoints:
 
 - `GET /api/v1/diameter/peers`
 - `GET /api/v1/diameter/peers/{id}`
@@ -247,24 +232,23 @@ curl -s -X POST http://localhost:8080/api/v1/sip/peers \
 - `PUT /api/v1/diameter/peers/{id}`
 - `DELETE /api/v1/diameter/peers/{id}`
 
-List sample response:
+Create/update fields:
 
-```json
-[
-  {
-    "id": "2dcb8fcb-8ff6-4b62-8a98-a8bc5f7a58be",
-    "name": "dra01.epc.mnc435.mcc311.3gppnetwork.org",
-    "host": "10.90.250.35",
-    "realm": "epc.mnc435.mcc311.3gppnetwork.org",
-    "port": 3868,
-    "transport": "sctp",
-    "applications": ["sh", "sgd"],
-    "enabled": true
-  }
-]
-```
+- `name`
+- `host`
+- `realm`
+- `port`
+- `transport`: `tcp | sctp`
+- `applications`: one or more of `sgd`, `sh`, `s6c`
+- `enabled`
 
-Create:
+Notes:
+
+- the runtime uses enabled `sh` and `s6c` peers for HSS-facing lookups
+- enabled `sgd` peers are used for outbound SGd delivery
+- delete returns `409` if the peer is still referenced by a routing rule
+
+Example create:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/diameter/peers \
@@ -280,7 +264,9 @@ curl -s -X POST http://localhost:8080/api/v1/diameter/peers \
   }'
 ```
 
-## Routing Rules
+### Routing Rules
+
+Endpoints:
 
 - `GET /api/v1/routing/rules`
 - `GET /api/v1/routing/rules/{id}`
@@ -288,55 +274,29 @@ curl -s -X POST http://localhost:8080/api/v1/diameter/peers \
 - `PUT /api/v1/routing/rules/{id}`
 - `DELETE /api/v1/routing/rules/{id}`
 
+Create/update fields:
+
+- `name`
+- `priority`
+- `match_src_iface`
+- `match_src_peer`
+- `match_dst_prefix`
+- `match_msisdn_min`
+- `match_msisdn_max`
+- `egress_iface`: `smpp | sipsimple`
+- `egress_peer`
+- `sf_policy_id`
+- `enabled`
+
 Notes:
 
 - routing rules are fallback-only
-- valid `egress_iface` values are `smpp` and `sipsimple`
-- `sgd` is built in and can no longer be created as a routing rule
-- legacy `sgd` routing rules are removed during startup cleanup
+- `sgd` is built in and is no longer a valid routing-rule `egress_iface`
+- legacy `sgd` rules are removed during store startup cleanup
 
-List sample response:
+### Store-And-Forward Policies
 
-```json
-[
-  {
-    "id": "ddcbec7e-55c4-4e9f-9d13-a5fd464fb114",
-    "name": "default-smpp-egress",
-    "priority": 100,
-    "match_src_iface": "smpp",
-    "match_src_peer": "",
-    "match_dst_prefix": "",
-    "match_msisdn_min": "",
-    "match_msisdn_max": "",
-    "egress_iface": "smpp",
-    "egress_peer": "msc0",
-    "sf_policy_id": "",
-    "enabled": true
-  }
-]
-```
-
-Create:
-
-```bash
-curl -s -X POST http://localhost:8080/api/v1/routing/rules \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name": "default-smpp-egress",
-    "priority": 100,
-    "match_src_iface": "smpp",
-    "match_src_peer": "",
-    "match_dst_prefix": "",
-    "match_msisdn_min": "",
-    "match_msisdn_max": "",
-    "egress_iface": "smpp",
-    "egress_peer": "msc0",
-    "sf_policy_id": "",
-    "enabled": true
-  }'
-```
-
-## Store-and-Forward Policies
+Endpoints:
 
 - `GET /api/v1/routing/policies`
 - `GET /api/v1/routing/policies/{id}`
@@ -344,22 +304,20 @@ curl -s -X POST http://localhost:8080/api/v1/routing/rules \
 - `PUT /api/v1/routing/policies/{id}`
 - `DELETE /api/v1/routing/policies/{id}`
 
-List sample response:
+Create/update fields:
 
-```json
-[
-  {
-    "id": "ba4fda4f-67f6-42f9-b3d4-113a7ea62467",
-    "name": "default",
-    "max_retries": 8,
-    "retry_schedule": [30, 300, 1800, 3600, 3600, 3600, 3600, 3600],
-    "max_ttl": "48h0m0s",
-    "vp_override": null
-  }
-]
-```
+- `name`
+- `max_retries`
+- `retry_schedule`: array of seconds
+- `max_ttl`: Go duration string
+- `vp_override`: Go duration string or empty
 
-Create:
+Notes:
+
+- delete returns `409` if the policy is still referenced by a routing rule
+- `vp_override` is persisted as an optional duration and may be `null` on reads
+
+Example create:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/routing/policies \
@@ -367,93 +325,174 @@ curl -s -X POST http://localhost:8080/api/v1/routing/policies \
   -d '{
     "name": "default",
     "max_retries": 8,
-    "retry_schedule": [30,300,1800,3600,3600,3600,3600,3600],
+    "retry_schedule": [30, 300, 1800, 3600],
     "max_ttl": "48h",
     "vp_override": ""
   }'
 ```
 
-Policy semantics:
+### Subscribers
 
-- `max_ttl` caps queued/waiting lifetime for messages that use that policy
-- if no policy is attached, the SMSC uses the global `smsc.max_queue_lifetime`
-- `vp_override` is currently future-capable for full wire-level validity handling; today it is used as an internal validity/lifetime hint, not a guaranteed on-the-wire validity field across all MT routes
-- `vp_override` also acts as an earlier expiry cap if it is shorter than the applicable queue lifetime cap
-
-## Subscribers
+Endpoints:
 
 - `GET /api/v1/subscribers`
 - `GET /api/v1/subscribers/{id}`
-- `POST /api/v1/subscribers` (upsert)
+- `POST /api/v1/subscribers`
 - `PUT /api/v1/subscribers/{id}`
 - `DELETE /api/v1/subscribers/{id}`
 
-List sample response:
+Create/update fields:
 
-```json
-[
-  {
-    "id": "c64e124a-5f4c-4b5a-9e2a-c6b6d8f0c983",
-    "msisdn": "3342012832",
-    "imsi": "",
-    "ims_registered": true,
-    "lte_attached": false,
-    "mme_host": "",
-    "mwd_set": false
-  }
-]
-```
+- `msisdn`
+- `imsi`
+- `ims_registered`
+- `lte_attached`
+- `mme_number_for_mt_sms`
+- `mme_host`
+- `mwd_set`
 
-Upsert:
+Notes:
+
+- `POST /api/v1/subscribers` is an upsert by subscriber identity
+
+Example upsert:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/subscribers \
   -H 'Content-Type: application/json' \
   -d '{
     "msisdn": "3342012832",
-    "imsi": "",
-    "ims_registered": true,
-    "lte_attached": false,
-    "mme_host": "",
+    "imsi": "311435123456789",
+    "ims_registered": false,
+    "lte_attached": true,
+    "mme_number_for_mt_sms": "+15551230000",
+    "mme_host": "mme01.epc.example.org",
     "mwd_set": false
   }'
 ```
 
-## Messages and Delivery Reports (Read-only)
+### S6c To SGd MME Mappings
+
+Endpoints:
+
+- `GET /api/v1/sgd/mme-mappings`
+- `GET /api/v1/sgd/mme-mappings/{id}`
+- `POST /api/v1/sgd/mme-mappings`
+- `PUT /api/v1/sgd/mme-mappings/{id}`
+- `DELETE /api/v1/sgd/mme-mappings/{id}`
+
+Fields:
+
+- `s6c_result`: MME hostname returned by `S6c`
+- `sgd_host`: hostname to use for outbound `SGd`
+- `enabled`
+
+These mappings are applied during built-in SGd route resolution.
+
+## Message And Delivery Data
+
+### Message Status Values
+
+Current stored message statuses:
+
+- `QUEUED`
+- `DISPATCHED`
+- `WAIT_TIMER`
+- `WAIT_EVENT`
+- `WAIT_TIMER_EVENT`
+- `DELIVERED`
+- `FAILED`
+- `EXPIRED`
+
+### Messages
+
+Endpoints:
 
 - `GET /api/v1/messages?limit=100`
 - `GET /api/v1/messages/{id}`
-- `GET /api/v1/delivery-reports?limit=100`
-- `GET /api/v1/delivery-reports/{id}`
+- `GET /api/v1/messages/queue?limit=100&src_msisdn=...&dst_msisdn=...&origin_peer=...`
+- `DELETE /api/v1/messages/queue/{id}`
+
+Notes:
+
+- `/api/v1/messages` returns recent messages across all states
+- `/api/v1/messages/queue` returns only `QUEUED`, `DISPATCHED`, `WAIT_TIMER`, `WAIT_EVENT`, and `WAIT_TIMER_EVENT`
+- queue deletion is only allowed for those queue-visible states
+
+Representative message fields:
+
+- `id`
+- `tp_mr`
+- `smpp_msg_id`
+- `origin_iface`
+- `origin_peer`
+- `egress_iface`
+- `egress_peer`
+- `route_cursor`
+- `src_msisdn`
+- `dst_msisdn`
+- `alert_correlation_id`
+- `deferred_reason`
+- `deferred_interface`
+- `serving_node_at_deferral`
+- `payload`
+- `udh`
+- `encoding`
+- `dcs`
+- `status`
+- `retry_count`
+- `next_retry_at`
+- `dr_required`
+- `submitted_at`
+- `expiry_at`
+- `delivered_at`
+
+Example queue query:
 
 ```bash
-curl -s "http://localhost:8080/api/v1/messages?limit=20" | jq
-curl -s "http://localhost:8080/api/v1/delivery-reports?limit=20" | jq
+curl -s "http://localhost:8080/api/v1/messages/queue?limit=20&dst_msisdn=3342012832" | jq
 ```
 
-Messages sample response:
+Example response:
 
 ```json
 [
   {
     "id": "6ff75e5c-bd8e-468f-8c17-8396d6124e38",
-    "smpp_msg_id": "000000000000001a",
     "origin_iface": "smpp",
     "origin_peer": "test",
-    "egress_iface": "sip3gpp",
-    "egress_peer": "10.90.250.52",
+    "egress_iface": "sgd",
+    "egress_peer": "mme01.epc.example.org",
+    "route_cursor": 2,
     "src_msisdn": "3342021234",
     "dst_msisdn": "3342012832",
-    "dcs": 0,
-    "status": "DELIVERED",
-    "retry_count": 0,
+    "alert_correlation_id": "c21zYzp...",
+    "deferred_reason": "sgd_delivery",
+    "deferred_interface": "sgd",
+    "status": "WAIT_TIMER_EVENT",
+    "retry_count": 1,
+    "next_retry_at": "2026-04-23T10:30:00Z",
     "dr_required": true,
-    "submitted_at": "2026-03-31T16:51:50Z"
+    "submitted_at": "2026-04-23T10:29:00Z",
+    "expiry_at": "2026-04-30T10:29:00Z"
   }
 ]
 ```
 
-Delivery reports sample response:
+### Delivery Reports
+
+Endpoints:
+
+- `GET /api/v1/delivery-reports?limit=100`
+- `GET /api/v1/delivery-reports/{id}`
+
+Example:
+
+```bash
+curl -s "http://localhost:8080/api/v1/delivery-reports?limit=20" | jq
+```
+
+Example response:
 
 ```json
 [
@@ -463,12 +502,7 @@ Delivery reports sample response:
     "status": "DELIVRD",
     "egress_iface": "sip3gpp",
     "raw_receipt": "id:6ff75e5c-bd8e-468f-8c17-8396d6124e38 stat:DELIVRD",
-    "reported_at": "2026-03-31T16:51:51Z"
+    "reported_at": "2026-04-23T10:29:01Z"
   }
 ]
 ```
-
-## UI Endpoints
-
-- `GET /ui/`
-- `GET /ui/assets/...`

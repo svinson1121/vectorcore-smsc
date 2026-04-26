@@ -1,6 +1,7 @@
 smsc:
   address: "+15550000000"  # SMSC E.164 / GT 
   sgd_sc_address_encoding: ascii_digits  # tbcd | ascii_digits
+  max_queue_lifetime: 168h  # global max queued/waiting lifetime before expiry
 
 smpp:
   # Plain inbound SMPP listener. External peers connect to this socket over TCP.
