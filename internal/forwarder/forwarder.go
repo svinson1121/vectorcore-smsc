@@ -18,6 +18,7 @@ import (
 	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
 	diametersgd "github.com/svinson1121/vectorcore-smsc/internal/diameter/sgd"
 	"github.com/svinson1121/vectorcore-smsc/internal/metrics"
+	"github.com/svinson1121/vectorcore-smsc/internal/numbering"
 	"github.com/svinson1121/vectorcore-smsc/internal/registry"
 	"github.com/svinson1121/vectorcore-smsc/internal/routing"
 	"github.com/svinson1121/vectorcore-smsc/internal/sgdmap"
@@ -89,13 +90,15 @@ type routingPassResult struct {
 
 // Forwarder dispatches messages to the correct egress interface.
 type Forwarder struct {
-	reg              *registry.Registry
-	engine           *routing.Engine
-	st               store.Store
-	scAddr           string // Our SMSC address for RP-OA / SGd SC-Address
-	m                *metrics.M
-	sgdMapper        *sgdmap.Mapper // optional; nil = no MME name translation
-	maxQueueLifetime time.Duration
+	reg                 *registry.Registry
+	engine              *routing.Engine
+	st                  store.Store
+	scAddr              string // Our SMSC address for RP-OA / SGd SC-Address
+	m                   *metrics.M
+	sgdMapper           *sgdmap.Mapper // optional; nil = no MME name translation
+	maxQueueLifetime    time.Duration
+	defaultCountryCode  string
+	localNationalLength int
 
 	// Egress senders — all optional; nil means that interface is not available.
 	iscSender    ISCSender
@@ -107,35 +110,39 @@ type Forwarder struct {
 
 // Config holds the dependencies wired into the Forwarder.
 type Config struct {
-	Registry         *registry.Registry
-	Engine           *routing.Engine
-	Store            store.Store
-	SCAddr           string
-	Metrics          *metrics.M
-	ISCSender        ISCSender
-	SimpleSender     SimpleSender
-	SMPPManager      *smppClient.Manager
-	SGdSender        SGdSender
-	Reporter         DeliveryReporter
-	SGDMapper        *sgdmap.Mapper // optional S6c→SGd MME name translator
-	MaxQueueLifetime time.Duration
+	Registry            *registry.Registry
+	Engine              *routing.Engine
+	Store               store.Store
+	SCAddr              string
+	Metrics             *metrics.M
+	ISCSender           ISCSender
+	SimpleSender        SimpleSender
+	SMPPManager         *smppClient.Manager
+	SGdSender           SGdSender
+	Reporter            DeliveryReporter
+	SGDMapper           *sgdmap.Mapper // optional S6c→SGd MME name translator
+	MaxQueueLifetime    time.Duration
+	DefaultCountryCode  string
+	LocalNationalLength int
 }
 
 // New creates a Forwarder.
 func New(cfg Config) *Forwarder {
 	return &Forwarder{
-		reg:              cfg.Registry,
-		engine:           cfg.Engine,
-		st:               cfg.Store,
-		scAddr:           cfg.SCAddr,
-		m:                cfg.Metrics,
-		sgdMapper:        cfg.SGDMapper,
-		maxQueueLifetime: cfg.MaxQueueLifetime,
-		iscSender:        cfg.ISCSender,
-		simpleSender:     cfg.SimpleSender,
-		smppMgr:          cfg.SMPPManager,
-		sgdSender:        cfg.SGdSender,
-		reporter:         cfg.Reporter,
+		reg:                 cfg.Registry,
+		engine:              cfg.Engine,
+		st:                  cfg.Store,
+		scAddr:              cfg.SCAddr,
+		m:                   cfg.Metrics,
+		sgdMapper:           cfg.SGDMapper,
+		maxQueueLifetime:    cfg.MaxQueueLifetime,
+		defaultCountryCode:  cfg.DefaultCountryCode,
+		localNationalLength: cfg.LocalNationalLength,
+		iscSender:           cfg.ISCSender,
+		simpleSender:        cfg.SimpleSender,
+		smppMgr:             cfg.SMPPManager,
+		sgdSender:           cfg.SGdSender,
+		reporter:            cfg.Reporter,
 	}
 }
 
@@ -156,11 +163,30 @@ func (f *Forwarder) Dispatch(ctx context.Context, msg *codec.Message) {
 		f.m.MessagesIn.WithLabelValues(string(msg.IngressInterface)).Inc()
 	}
 
+	f.normalizeIngressRecipient(msg)
+
 	now := time.Now()
 	f.persistMessage(ctx, msg, "", "", store.MessageStatusDispatched, now)
 
 	result := f.runRoutingPass(ctx, msg, 0)
 	f.finalizeRoutingPass(ctx, msg, now, 0, 1, result, "forwarder")
+}
+
+func (f *Forwarder) normalizeIngressRecipient(msg *codec.Message) {
+	if msg == nil {
+		return
+	}
+	raw := msg.Destination.MSISDN
+	normalized := numbering.NormalizeRecipientMSISDN(raw, msg.Destination.TON, f.defaultCountryCode, f.localNationalLength)
+	msg.Destination.MSISDN = normalized
+	slog.Debug("forwarder: normalized ingress recipient MSISDN",
+		"raw_tp_da_digits", raw,
+		"tp_da_ton", msg.Destination.TON,
+		"tp_da_npi", msg.Destination.NPI,
+		"default_country_code", f.defaultCountryCode,
+		"local_national_length", f.localNationalLength,
+		"normalized_recipient_msisdn", normalized,
+	)
 }
 
 func (f *Forwarder) tryRoutes(ctx context.Context, msg *codec.Message, startCursor int) (*selectedRoute, *selectedRoute, error) {

@@ -3,6 +3,10 @@ smsc:
   sgd_sc_address_encoding: ascii_digits  # tbcd | ascii_digits
   max_queue_lifetime: 168h  # global max queued/waiting lifetime before expiry
 
+numbering:
+  default_country_code: "1"
+  local_national_length: 10
+
 smpp:
   # Plain inbound SMPP listener. External peers connect to this socket over TCP.
   server:

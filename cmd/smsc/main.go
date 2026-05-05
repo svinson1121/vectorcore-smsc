@@ -289,18 +289,20 @@ func run(cfgPath string) error {
 
 	// ── Forwarder ────────────────────────────────────────────────────────────
 	fwd := forwarder.New(forwarder.Config{
-		Registry:         reg,
-		Engine:           routingEngine,
-		Store:            st,
-		SCAddr:           scAddr,
-		Metrics:          m,
-		ISCSender:        iscSender,
-		SimpleSender:     simpleSender,
-		SMPPManager:      clientMgr,
-		SGdSender:        sgdServer,
-		Reporter:         correlator,
-		SGDMapper:        sgdMapper,
-		MaxQueueLifetime: cfg.SMSC.MaxQueueLifetime,
+		Registry:            reg,
+		Engine:              routingEngine,
+		Store:               st,
+		SCAddr:              scAddr,
+		Metrics:             m,
+		ISCSender:           iscSender,
+		SimpleSender:        simpleSender,
+		SMPPManager:         clientMgr,
+		SGdSender:           sgdServer,
+		Reporter:            correlator,
+		SGDMapper:           sgdMapper,
+		MaxQueueLifetime:    cfg.SMSC.MaxQueueLifetime,
+		DefaultCountryCode:  cfg.Numbering.DefaultCountryCode,
+		LocalNationalLength: cfg.Numbering.LocalNationalLength,
 	})
 
 	// ── Retry Scheduler ───────────────────────────────────────────────────────

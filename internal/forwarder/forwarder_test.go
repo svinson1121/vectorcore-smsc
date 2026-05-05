@@ -9,6 +9,7 @@ import (
 	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
 	"github.com/svinson1121/vectorcore-smsc/internal/diameter/s6c"
 	diametersgd "github.com/svinson1121/vectorcore-smsc/internal/diameter/sgd"
+	"github.com/svinson1121/vectorcore-smsc/internal/numbering"
 	"github.com/svinson1121/vectorcore-smsc/internal/registry"
 	"github.com/svinson1121/vectorcore-smsc/internal/routing"
 	"github.com/svinson1121/vectorcore-smsc/internal/store"
@@ -374,6 +375,32 @@ func newTestRegistry(t *testing.T, st store.Store) *registry.Registry {
 		t.Fatalf("registry.New() error = %v", err)
 	}
 	return reg
+}
+
+func TestNormalizeIngressRecipientUsesConfiguredNationalContext(t *testing.T) {
+	f := New(Config{
+		DefaultCountryCode:  "1",
+		LocalNationalLength: 10,
+	})
+	msg := &codec.Message{
+		Destination: codec.Address{
+			MSISDN: "6752012860",
+			TON:    numbering.TONUnknown,
+			NPI:    0x01,
+		},
+	}
+
+	f.normalizeIngressRecipient(msg)
+
+	if got, want := msg.Destination.MSISDN, "16752012860"; got != want {
+		t.Fatalf("Destination.MSISDN = %q, want %q", got, want)
+	}
+	if got, want := msg.Destination.TON, numbering.TONUnknown; got != want {
+		t.Fatalf("Destination.TON = %d, want %d", got, want)
+	}
+	if got, want := msg.Destination.NPI, byte(0x01); got != want {
+		t.Fatalf("Destination.NPI = %d, want %d", got, want)
+	}
 }
 
 func TestSelectRouteUsesS6cOnlyForFallbackCandidates(t *testing.T) {

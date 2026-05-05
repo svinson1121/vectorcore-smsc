@@ -5,19 +5,21 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	SMSC     SMSCConfig     `yaml:"smsc"`
-	SMPP     SMPPConfig     `yaml:"smpp"`
-	SIP      SIPConfig      `yaml:"sip"`
-	Diameter DiameterConfig `yaml:"diameter"`
-	Database DatabaseConfig `yaml:"database"`
-	API      APIConfig      `yaml:"api"`
-	Log      LogConfig      `yaml:"log"`
+	SMSC      SMSCConfig      `yaml:"smsc"`
+	Numbering NumberingConfig `yaml:"numbering"`
+	SMPP      SMPPConfig      `yaml:"smpp"`
+	SIP       SIPConfig       `yaml:"sip"`
+	Diameter  DiameterConfig  `yaml:"diameter"`
+	Database  DatabaseConfig  `yaml:"database"`
+	API       APIConfig       `yaml:"api"`
+	Log       LogConfig       `yaml:"log"`
 }
 
 type LogConfig struct {
@@ -32,6 +34,11 @@ type SMSCConfig struct {
 	Address              string        `yaml:"address"`                 // SMSC E.164 / GT — used across all interfaces
 	SGdSCAddressEncoding string        `yaml:"sgd_sc_address_encoding"` // tbcd | ascii_digits
 	MaxQueueLifetime     time.Duration `yaml:"max_queue_lifetime"`      // global max queued/waiting lifetime
+}
+
+type NumberingConfig struct {
+	DefaultCountryCode  string `yaml:"default_country_code"`
+	LocalNationalLength int    `yaml:"local_national_length"`
 }
 
 type SMPPConfig struct {
@@ -117,6 +124,7 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
+	c.Numbering.DefaultCountryCode = strings.TrimPrefix(strings.TrimSpace(c.Numbering.DefaultCountryCode), "+")
 	if c.SMSC.SGdSCAddressEncoding == "" {
 		c.SMSC.SGdSCAddressEncoding = "tbcd"
 	}

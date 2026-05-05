@@ -52,6 +52,21 @@ diameter:
 	}
 }
 
+func TestLoadNumberingStripsLeadingPlusFromDefaultCountryCode(t *testing.T) {
+	cfg := loadTestConfig(t, `
+numbering:
+  default_country_code: "+33"
+  local_national_length: 9
+`)
+
+	if got := cfg.Numbering.DefaultCountryCode; got != "33" {
+		t.Fatalf("DefaultCountryCode = %q, want %q", got, "33")
+	}
+	if got := cfg.Numbering.LocalNationalLength; got != 9 {
+		t.Fatalf("LocalNationalLength = %d, want 9", got)
+	}
+}
+
 func loadTestConfig(t *testing.T, body string) *Config {
 	t.Helper()
 	dir := t.TempDir()
