@@ -177,6 +177,10 @@ type smppClientInput struct {
 	BindType          string `json:"bind_type" enum:"transmitter,receiver,transceiver"`
 	ReconnectInterval string `json:"reconnect_interval" doc:"Go duration e.g. 10s"`
 	ThroughputLimit   int    `json:"throughput_limit"`
+	SourceAddrTON     *int   `json:"source_addr_ton,omitempty" doc:"SMPP source_addr_ton; null=auto"`
+	SourceAddrNPI     *int   `json:"source_addr_npi,omitempty" doc:"SMPP source_addr_npi; null=auto"`
+	DestAddrTON       *int   `json:"dest_addr_ton,omitempty" doc:"SMPP dest_addr_ton; null=auto"`
+	DestAddrNPI       *int   `json:"dest_addr_npi,omitempty" doc:"SMPP dest_addr_npi; null=auto"`
 	Enabled           bool   `json:"enabled"`
 }
 
@@ -191,6 +195,10 @@ type smppClientUpdateInput struct {
 	BindType          string `json:"bind_type" enum:"transmitter,receiver,transceiver"`
 	ReconnectInterval string `json:"reconnect_interval" doc:"Go duration e.g. 10s"`
 	ThroughputLimit   int    `json:"throughput_limit"`
+	SourceAddrTON     *int   `json:"source_addr_ton,omitempty" doc:"SMPP source_addr_ton; null=auto"`
+	SourceAddrNPI     *int   `json:"source_addr_npi,omitempty" doc:"SMPP source_addr_npi; null=auto"`
+	DestAddrTON       *int   `json:"dest_addr_ton,omitempty" doc:"SMPP dest_addr_ton; null=auto"`
+	DestAddrNPI       *int   `json:"dest_addr_npi,omitempty" doc:"SMPP dest_addr_npi; null=auto"`
 	Enabled           bool   `json:"enabled"`
 }
 
@@ -281,6 +289,18 @@ func registerSMPPClients(api huma.API, st store.Store) {
 }
 
 func smppClientFromInput(b smppClientInput) (store.SMPPClient, error) {
+	if err := validateTONNPI("source_addr_ton", b.SourceAddrTON); err != nil {
+		return store.SMPPClient{}, err
+	}
+	if err := validateTONNPI("source_addr_npi", b.SourceAddrNPI); err != nil {
+		return store.SMPPClient{}, err
+	}
+	if err := validateTONNPI("dest_addr_ton", b.DestAddrTON); err != nil {
+		return store.SMPPClient{}, err
+	}
+	if err := validateTONNPI("dest_addr_npi", b.DestAddrNPI); err != nil {
+		return store.SMPPClient{}, err
+	}
 	d, err := time.ParseDuration(b.ReconnectInterval)
 	if err != nil {
 		d = 10 * time.Second
@@ -292,11 +312,26 @@ func smppClientFromInput(b smppClientInput) (store.SMPPClient, error) {
 	return store.SMPPClient{
 		Name: b.Name, Host: b.Host, Port: b.Port, Transport: transport, VerifyServerCert: b.VerifyServerCert,
 		SystemID: b.SystemID, Password: b.Password, BindType: b.BindType,
-		ReconnectInterval: d, ThroughputLimit: b.ThroughputLimit, Enabled: b.Enabled,
+		ReconnectInterval: d, ThroughputLimit: b.ThroughputLimit,
+		SourceAddrTON: b.SourceAddrTON, SourceAddrNPI: b.SourceAddrNPI,
+		DestAddrTON: b.DestAddrTON, DestAddrNPI: b.DestAddrNPI,
+		Enabled: b.Enabled,
 	}, nil
 }
 
 func smppClientFromUpdateInput(b smppClientUpdateInput) (store.SMPPClient, error) {
+	if err := validateTONNPI("source_addr_ton", b.SourceAddrTON); err != nil {
+		return store.SMPPClient{}, err
+	}
+	if err := validateTONNPI("source_addr_npi", b.SourceAddrNPI); err != nil {
+		return store.SMPPClient{}, err
+	}
+	if err := validateTONNPI("dest_addr_ton", b.DestAddrTON); err != nil {
+		return store.SMPPClient{}, err
+	}
+	if err := validateTONNPI("dest_addr_npi", b.DestAddrNPI); err != nil {
+		return store.SMPPClient{}, err
+	}
 	d, err := time.ParseDuration(b.ReconnectInterval)
 	if err != nil {
 		d = 10 * time.Second
@@ -308,8 +343,21 @@ func smppClientFromUpdateInput(b smppClientUpdateInput) (store.SMPPClient, error
 	return store.SMPPClient{
 		Name: b.Name, Host: b.Host, Port: b.Port, Transport: transport, VerifyServerCert: b.VerifyServerCert,
 		SystemID: b.SystemID, Password: b.Password, BindType: b.BindType,
-		ReconnectInterval: d, ThroughputLimit: b.ThroughputLimit, Enabled: b.Enabled,
+		ReconnectInterval: d, ThroughputLimit: b.ThroughputLimit,
+		SourceAddrTON: b.SourceAddrTON, SourceAddrNPI: b.SourceAddrNPI,
+		DestAddrTON: b.DestAddrTON, DestAddrNPI: b.DestAddrNPI,
+		Enabled: b.Enabled,
 	}, nil
+}
+
+func validateTONNPI(field string, value *int) error {
+	if value == nil {
+		return nil
+	}
+	if *value < 0 || *value > 255 {
+		return fmt.Errorf("%s must be between 0 and 255", field)
+	}
+	return nil
 }
 
 // ── SIP Peers ─────────────────────────────────────────────────────────────────

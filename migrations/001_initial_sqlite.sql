@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS smpp_clients (
     bind_type           TEXT NOT NULL CHECK (bind_type IN ('transmitter','receiver','transceiver')),
     reconnect_interval  TEXT NOT NULL DEFAULT '10s',
     throughput_limit    INTEGER NOT NULL DEFAULT 0,
+    source_addr_ton     INTEGER,
+    source_addr_npi     INTEGER,
+    dest_addr_ton       INTEGER,
+    dest_addr_npi       INTEGER,
     enabled             INTEGER NOT NULL DEFAULT 1,
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT NOT NULL DEFAULT (datetime('now'))

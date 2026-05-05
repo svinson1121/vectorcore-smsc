@@ -68,6 +68,10 @@ type SMPPClient struct {
 	BindType          string        `json:"bind_type"`
 	ReconnectInterval time.Duration `json:"reconnect_interval"`
 	ThroughputLimit   int           `json:"throughput_limit"`
+	SourceAddrTON     *int          `json:"source_addr_ton"`
+	SourceAddrNPI     *int          `json:"source_addr_npi"`
+	DestAddrTON       *int          `json:"dest_addr_ton"`
+	DestAddrNPI       *int          `json:"dest_addr_npi"`
 	Enabled           bool          `json:"enabled"`
 	CreatedAt         time.Time     `json:"created_at"`
 	UpdatedAt         time.Time     `json:"updated_at"`

@@ -15,6 +15,37 @@ import {
   getStatusPeers,
 } from '../api/client.js'
 
+const smppTONOptions = [
+  { value: '0', label: '0 - Unknown' },
+  { value: '1', label: '1 - International' },
+  { value: '2', label: '2 - National' },
+  { value: '3', label: '3 - Network Specific' },
+  { value: '4', label: '4 - Subscriber Number' },
+  { value: '5', label: '5 - Alphanumeric' },
+  { value: '6', label: '6 - Abbreviated' },
+]
+
+const smppNPIOptions = [
+  { value: '0', label: '0 - Unknown' },
+  { value: '1', label: '1 - ISDN / E.164' },
+  { value: '3', label: '3 - Data / X.121' },
+  { value: '4', label: '4 - Telex / F.69' },
+  { value: '6', label: '6 - Land Mobile / E.212' },
+  { value: '8', label: '8 - National' },
+  { value: '9', label: '9 - Private' },
+  { value: '10', label: '10 - ERMES' },
+  { value: '13', label: '13 - Internet' },
+  { value: '18', label: '18 - WAP Client ID' },
+]
+
+function optionalSMPPAddressValue(value) {
+  return value === 'auto' ? null : Number(value)
+}
+
+function smppTONNPILabel(ton, npi) {
+  return `${ton == null ? 'auto' : ton}/${npi == null ? 'auto' : npi}`
+}
+
 export default function Peers() {
   const [tab, setTab] = useState('connected')
   return (
@@ -506,6 +537,8 @@ const SMPP_CLI_DEFAULTS = {
   name: '', host: '', port: 2775, system_id: '', password: '',
   transport: 'tcp', verify_server_cert: false,
   bind_type: 'transceiver', reconnect_interval: '10s', throughput_limit: 0, enabled: true,
+  source_addr_ton: 'auto', source_addr_npi: 'auto',
+  dest_addr_ton: 'auto', dest_addr_npi: 'auto',
 }
 
 function normalizeReconnectInterval(value) {
@@ -555,10 +588,10 @@ function SMPPClientsTab() {
       ) : (
         <div className="table-container">
           <table>
-            <thead><tr>
-              <th>Name</th><th>Host</th><th>Transport</th><th>Verify</th><th>System ID</th>
-              <th>Bind Type</th><th>Reconnect</th><th>Enabled</th><th>Actions</th>
-            </tr></thead>
+	            <thead><tr>
+	              <th>Name</th><th>Host</th><th>Transport</th><th>Verify</th><th>System ID</th>
+	              <th>Bind Type</th><th>TON/NPI</th><th>Reconnect</th><th>Enabled</th><th>Actions</th>
+	            </tr></thead>
             <tbody>
               {list.map(c => (
                 <tr key={c.id}>
@@ -566,9 +599,12 @@ function SMPPClientsTab() {
                   <td className="mono text-muted" style={{ fontSize: '0.78rem' }}>{c.host}:{c.port}</td>
                   <td><Badge state={c.transport || 'tcp'} /></td>
                   <td><Badge state={String(!!c.verify_server_cert)} /></td>
-                  <td className="mono" style={{ fontSize: '0.8rem' }}>{c.system_id}</td>
-                  <td><Badge state={c.bind_type} /></td>
-                  <td className="mono text-muted">{c.reconnect_interval || '10s'}</td>
+	                  <td className="mono" style={{ fontSize: '0.8rem' }}>{c.system_id}</td>
+	                  <td><Badge state={c.bind_type} /></td>
+	                  <td className="mono text-muted" style={{ fontSize: '0.75rem' }}>
+	                    src {smppTONNPILabel(c.source_addr_ton, c.source_addr_npi)} / dst {smppTONNPILabel(c.dest_addr_ton, c.dest_addr_npi)}
+	                  </td>
+	                  <td className="mono text-muted">{c.reconnect_interval || '10s'}</td>
                   <td><EnabledStatus enabled={c.enabled} /></td>
                   <td>
                     <div className="flex gap-6">
@@ -597,11 +633,15 @@ function SMPPClientModal({ initial, onClose, onSaved }) {
   const toast = useToast()
   const [form, setForm] = useState(() => {
     const base = initial ? { ...SMPP_CLI_DEFAULTS, ...initial } : { ...SMPP_CLI_DEFAULTS }
-    base.reconnect_interval = normalizeReconnectInterval(base.reconnect_interval)
-    base.transport = base.transport || 'tcp'
-    base.verify_server_cert = !!base.verify_server_cert
-    return base
-  })
+	    base.reconnect_interval = normalizeReconnectInterval(base.reconnect_interval)
+	    base.transport = base.transport || 'tcp'
+	    base.verify_server_cert = !!base.verify_server_cert
+	    base.source_addr_ton = base.source_addr_ton == null ? 'auto' : String(base.source_addr_ton)
+	    base.source_addr_npi = base.source_addr_npi == null ? 'auto' : String(base.source_addr_npi)
+	    base.dest_addr_ton = base.dest_addr_ton == null ? 'auto' : String(base.dest_addr_ton)
+	    base.dest_addr_npi = base.dest_addr_npi == null ? 'auto' : String(base.dest_addr_npi)
+	    return base
+	  })
   const [submitting, setSubmitting] = useState(false)
   const set = useCallback((k, v) => setForm(p => ({ ...p, [k]: v })), [])
   const setTransport = useCallback((nextTransport) => {
@@ -628,11 +668,15 @@ function SMPPClientModal({ initial, onClose, onSaved }) {
         transport: form.transport || 'tcp',
         verify_server_cert: !!form.verify_server_cert,
         system_id: form.system_id,
-        bind_type: form.bind_type,
-        reconnect_interval: normalizeReconnectInterval(form.reconnect_interval),
-        throughput_limit: Number(form.throughput_limit),
-        enabled: form.enabled,
-      }
+	        bind_type: form.bind_type,
+	        reconnect_interval: normalizeReconnectInterval(form.reconnect_interval),
+	        throughput_limit: Number(form.throughput_limit),
+	        source_addr_ton: optionalSMPPAddressValue(form.source_addr_ton),
+	        source_addr_npi: optionalSMPPAddressValue(form.source_addr_npi),
+	        dest_addr_ton: optionalSMPPAddressValue(form.dest_addr_ton),
+	        dest_addr_npi: optionalSMPPAddressValue(form.dest_addr_npi),
+	        enabled: form.enabled,
+	      }
       if (!initial || form.password) {
         payload.password = form.password
       }
@@ -695,21 +739,61 @@ function SMPPClientModal({ initial, onClose, onSaved }) {
               </select>
             </div>
           </div>
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Reconnect Interval</label>
-              <input className="input mono" value={form.reconnect_interval} onChange={e => set('reconnect_interval', e.target.value)} placeholder="10s" />
-            </div>
+	          <div className="form-row">
+	            <div className="form-group">
+	              <label className="form-label">Reconnect Interval</label>
+	              <input className="input mono" value={form.reconnect_interval} onChange={e => set('reconnect_interval', e.target.value)} placeholder="10s" />
+	            </div>
             <div className="form-group">
               <label className="form-label">TLS Verification</label>
               <label className="checkbox-wrap" style={{ minHeight: 36 }}>
                 <input type="checkbox" checked={!!form.verify_server_cert} onChange={e => set('verify_server_cert', e.target.checked)} />
                 <span>Verify server certificate</span>
-              </label>
-            </div>
-          </div>
-          <div className="form-group">
-            <label className="form-label">Throughput Limit (msg/s)</label>
+	              </label>
+	            </div>
+	          </div>
+	          <div className="form-row">
+	            <div className="form-group">
+	              <label className="form-label">Source TON</label>
+	              <select className="select" value={form.source_addr_ton} onChange={e => set('source_addr_ton', e.target.value)}>
+	                <option value="auto">Auto</option>
+	                {smppTONOptions.map(option => (
+	                  <option key={option.value} value={option.value}>{option.label}</option>
+	                ))}
+	              </select>
+	            </div>
+	            <div className="form-group">
+	              <label className="form-label">Source NPI</label>
+	              <select className="select" value={form.source_addr_npi} onChange={e => set('source_addr_npi', e.target.value)}>
+	                <option value="auto">Auto</option>
+	                {smppNPIOptions.map(option => (
+	                  <option key={option.value} value={option.value}>{option.label}</option>
+	                ))}
+	              </select>
+	            </div>
+	          </div>
+	          <div className="form-row">
+	            <div className="form-group">
+	              <label className="form-label">Destination TON</label>
+	              <select className="select" value={form.dest_addr_ton} onChange={e => set('dest_addr_ton', e.target.value)}>
+	                <option value="auto">Auto</option>
+	                {smppTONOptions.map(option => (
+	                  <option key={option.value} value={option.value}>{option.label}</option>
+	                ))}
+	              </select>
+	            </div>
+	            <div className="form-group">
+	              <label className="form-label">Destination NPI</label>
+	              <select className="select" value={form.dest_addr_npi} onChange={e => set('dest_addr_npi', e.target.value)}>
+	                <option value="auto">Auto</option>
+	                {smppNPIOptions.map(option => (
+	                  <option key={option.value} value={option.value}>{option.label}</option>
+	                ))}
+	              </select>
+	            </div>
+	          </div>
+	          <div className="form-group">
+	            <label className="form-label">Throughput Limit (msg/s)</label>
             <input className="input mono" type="number" min={0} value={form.throughput_limit} onChange={e => set('throughput_limit', e.target.value)} />
             <span className="form-hint">0 = unlimited</span>
           </div>

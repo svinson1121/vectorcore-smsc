@@ -73,6 +73,7 @@ func (m *Manager) SendViaPeer(name string, pdu *smpp.PDU) (*smpp.PDU, error) {
 	if link == nil {
 		return nil, &ErrNoPeer{Name: name}
 	}
+	m.applyAddressOverrides(name, pdu)
 	return link.SendAndWait(pdu, sendTimeout)
 }
 
@@ -152,7 +153,51 @@ func smppClientRuntimeEqual(a, b store.SMPPClient) bool {
 		a.BindType == b.BindType &&
 		a.ReconnectInterval == b.ReconnectInterval &&
 		a.ThroughputLimit == b.ThroughputLimit &&
+		intPtrEqual(a.SourceAddrTON, b.SourceAddrTON) &&
+		intPtrEqual(a.SourceAddrNPI, b.SourceAddrNPI) &&
+		intPtrEqual(a.DestAddrTON, b.DestAddrTON) &&
+		intPtrEqual(a.DestAddrNPI, b.DestAddrNPI) &&
 		a.Enabled == b.Enabled
+}
+
+func (m *Manager) applyAddressOverrides(name string, pdu *smpp.PDU) {
+	if pdu == nil {
+		return
+	}
+	switch pdu.CommandID {
+	case smpp.CmdSubmitSM, smpp.CmdDeliverSM:
+	default:
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, sess := range m.sessions {
+		cfg := sess.cfg
+		if cfg.Name != name && cfg.SystemID != name {
+			continue
+		}
+		if cfg.SourceAddrTON != nil {
+			pdu.SourceAddrTON = byte(*cfg.SourceAddrTON)
+		}
+		if cfg.SourceAddrNPI != nil {
+			pdu.SourceAddrNPI = byte(*cfg.SourceAddrNPI)
+		}
+		if cfg.DestAddrTON != nil {
+			pdu.DestAddrTON = byte(*cfg.DestAddrTON)
+		}
+		if cfg.DestAddrNPI != nil {
+			pdu.DestAddrNPI = byte(*cfg.DestAddrNPI)
+		}
+		return
+	}
+}
+
+func intPtrEqual(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // startSession starts a new Session (acquires lock internally).
