@@ -141,7 +141,8 @@ func decodeStatusReport(data []byte) (*codec.Message, error) {
 	}
 	pos += n
 
-	if pos+14 > len(data) {
+	// Two seven-octet timestamps are followed by the mandatory TP-ST octet.
+	if pos+15 > len(data) {
 		return nil, fmt.Errorf("status report truncated")
 	}
 	// TP-SCTS (7 bytes)
@@ -300,29 +301,50 @@ func decodeUD(data []byte, pos int, dcs byte, hasUDHI bool) (*codec.Message, err
 	// Payload
 	switch enc {
 	case codec.EncodingGSM7:
-		// udl = number of septets
-		msg.Text = DecodeGSM7(data[pos:], udl, udhOctets)
+		// UDL is the total number of septets, including the UDH and its
+		// alignment fill bits.
+		requiredOctets := (udl*7 + 7) / 8
+		if requiredOctets > len(data)-pos {
+			return nil, fmt.Errorf("GSM7 user data truncated: need %d octets, have %d", requiredOctets, len(data)-pos)
+		}
+		udhSeptets := (udhOctets*8 + 6) / 7
+		if udhSeptets > udl {
+			return nil, fmt.Errorf("UDH requires %d septets, exceeds UDL %d", udhSeptets, udl)
+		}
+		msg.Text = DecodeGSM7(data[pos:pos+requiredOctets], udl-udhSeptets, udhOctets)
 
 	case codec.EncodingUCS2:
-		// udl = number of octets
-		udEnd := pos + udl
-		if udEnd > len(data) {
-			udEnd = len(data)
+		// UDL is the total number of octets, including the UDH.
+		if udl > len(data)-pos {
+			return nil, fmt.Errorf("UCS2 user data truncated: need %d octets, have %d", udl, len(data)-pos)
 		}
+		if udhOctets > udl {
+			return nil, fmt.Errorf("UDH length %d exceeds UDL %d", udhOctets, udl)
+		}
+		udEnd := pos + udl
 		payload := data[pos+udhOctets : udEnd]
 		msg.Text = DecodeUCS2(payload)
 
 	case codec.EncodingBinary:
-		udEnd := pos + udl
-		if udEnd > len(data) {
-			udEnd = len(data)
+		if udl > len(data)-pos {
+			return nil, fmt.Errorf("binary user data truncated: need %d octets, have %d", udl, len(data)-pos)
 		}
+		if udhOctets > udl {
+			return nil, fmt.Errorf("UDH length %d exceeds UDL %d", udhOctets, udl)
+		}
+		udEnd := pos + udl
 		payload := data[pos+udhOctets : udEnd]
 		msg.Binary = make([]byte, len(payload))
 		copy(msg.Binary, payload)
 
 	default:
-		msg.Text = string(data[pos+udhOctets:])
+		if udl > len(data)-pos {
+			return nil, fmt.Errorf("user data truncated: need %d octets, have %d", udl, len(data)-pos)
+		}
+		if udhOctets > udl {
+			return nil, fmt.Errorf("UDH length %d exceeds UDL %d", udhOctets, udl)
+		}
+		msg.Text = string(data[pos+udhOctets : pos+udl])
 	}
 
 	return msg, nil
@@ -415,5 +437,5 @@ func decodeSCTS(b []byte) time.Time {
 }
 
 func bcdByte(b byte) byte {
-	return (b&0x0F)*10 + ((b>>4)&0x0F)
+	return (b&0x0F)*10 + ((b >> 4) & 0x0F)
 }

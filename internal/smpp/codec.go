@@ -7,7 +7,12 @@ import (
 	"io"
 )
 
-const HeaderLen = 16
+const (
+	HeaderLen = 16
+	// MaxPDULen bounds memory allocated from the untrusted command_length
+	// field. SMPP uses a 32-bit length but normal SMS PDUs are far smaller.
+	MaxPDULen = 16 * 1024 * 1024
+)
 
 // Encode serialises a PDU to its wire representation.
 // CommandLength is set automatically.
@@ -18,6 +23,9 @@ func Encode(pdu *PDU) ([]byte, error) {
 	}
 
 	pdu.CommandLength = uint32(HeaderLen + len(body))
+	if pdu.CommandLength > MaxPDULen {
+		return nil, fmt.Errorf("smpp: command_length %d exceeds maximum %d", pdu.CommandLength, MaxPDULen)
+	}
 
 	buf := make([]byte, HeaderLen+len(body))
 	binary.BigEndian.PutUint32(buf[0:4], pdu.CommandLength)
@@ -43,6 +51,9 @@ func Decode(r io.Reader) (*PDU, error) {
 
 	if pdu.CommandLength < HeaderLen {
 		return nil, fmt.Errorf("smpp: invalid command_length %d", pdu.CommandLength)
+	}
+	if pdu.CommandLength > MaxPDULen {
+		return nil, fmt.Errorf("smpp: command_length %d exceeds maximum %d", pdu.CommandLength, MaxPDULen)
 	}
 
 	bodyLen := int(pdu.CommandLength) - HeaderLen
@@ -78,6 +89,9 @@ func encodeBody(pdu *PDU) ([]byte, error) {
 		writeCStr(&buf, pdu.SystemID)
 
 	case CmdSubmitSM, CmdDeliverSM:
+		if len(pdu.ShortMessage) > 255 {
+			return nil, fmt.Errorf("smpp: short_message length %d exceeds 255", len(pdu.ShortMessage))
+		}
 		writeCStr(&buf, pdu.ServiceType)
 		buf.WriteByte(pdu.SourceAddrTON)
 		buf.WriteByte(pdu.SourceAddrNPI)
@@ -98,7 +112,9 @@ func encodeBody(pdu *PDU) ([]byte, error) {
 		buf.WriteByte(pdu.SMLength)
 		buf.Write(pdu.ShortMessage)
 		// Append optional TLV parameters
-		encodeTLVs(&buf, pdu.TLVs)
+		if err := encodeTLVs(&buf, pdu.TLVs); err != nil {
+			return nil, err
+		}
 
 	case CmdSubmitSMResp, CmdDeliverSMResp:
 		writeCStr(&buf, pdu.MessageID)
@@ -227,12 +243,20 @@ func decodeBody(pdu *PDU, body []byte) error {
 
 // ---- TLV encode/decode ----
 
-func encodeTLVs(buf *bytes.Buffer, tlvs map[uint16][]byte) {
+func encodeTLVs(buf *bytes.Buffer, tlvs map[uint16][]byte) error {
 	for tag, val := range tlvs {
-		binary.Write(buf, binary.BigEndian, tag)
-		binary.Write(buf, binary.BigEndian, uint16(len(val)))
+		if len(val) > 65535 {
+			return fmt.Errorf("smpp: TLV 0x%04x length %d exceeds 65535", tag, len(val))
+		}
+		if err := binary.Write(buf, binary.BigEndian, tag); err != nil {
+			return err
+		}
+		if err := binary.Write(buf, binary.BigEndian, uint16(len(val))); err != nil {
+			return err
+		}
 		buf.Write(val)
 	}
+	return nil
 }
 
 func decodeTLVs(pdu *PDU, r *bytes.Reader) error {
@@ -252,6 +276,9 @@ func decodeTLVs(pdu *PDU, r *bytes.Reader) error {
 			pdu.TLVs = make(map[uint16][]byte)
 		}
 		pdu.TLVs[tag] = val
+	}
+	if r.Len() != 0 {
+		return fmt.Errorf("smpp: trailing %d byte(s) after TLVs", r.Len())
 	}
 	return nil
 }

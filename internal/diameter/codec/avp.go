@@ -117,6 +117,9 @@ func Decode(b []byte) (*AVP, int, error) {
 			return nil, 0, errors.New("avp: buffer too short for vendor header")
 		}
 		a.VendorID = binary.BigEndian.Uint32(b[8:12])
+		if a.VendorID == 0 {
+			return nil, 0, errors.New("avp: vendor-specific flag set with zero vendor ID")
+		}
 		hdrSize = 12
 	}
 	dataLen := int(length) - hdrSize
@@ -127,7 +130,7 @@ func Decode(b []byte) (*AVP, int, error) {
 	copy(a.Data, b[hdrSize:int(length)])
 	consumed := (int(length) + 3) &^ 3
 	if consumed > len(b) {
-		consumed = len(b)
+		return nil, 0, fmt.Errorf("avp: buffer too short for padding: code=%d", a.Code)
 	}
 	return a, consumed, nil
 }

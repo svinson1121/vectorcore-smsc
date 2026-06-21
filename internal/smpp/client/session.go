@@ -271,6 +271,9 @@ func (s *Session) readLoop(ctx context.Context, conn *smpp.Conn, link *smpp.Link
 		case <-s.stopCh:
 			return s.gracefulUnbind(conn, link, pduCh, errCh)
 		case err := <-errCh:
+			if ctx.Err() != nil {
+				return nil
+			}
 			return err
 
 		case pdu := <-pduCh:
