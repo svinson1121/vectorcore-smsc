@@ -3,8 +3,11 @@ import { Plus, Trash2, Edit3, RefreshCw, XCircle, Wifi, WifiOff } from 'lucide-r
 import Badge from '../components/Badge.jsx'
 import Spinner from '../components/Spinner.jsx'
 import Modal from '../components/Modal.jsx'
+import DiscardConfirm from '../components/DiscardConfirm.jsx'
 import { useToast } from '../components/Toast.jsx'
 import { usePoller } from '../hooks/usePoller.js'
+import { useDirtyState } from '../hooks/useDirtyState.js'
+import { useConfirmClose } from '../hooks/useConfirmClose.js'
 import {
   getSMPPAccounts, createSMPPAccount, updateSMPPAccount, deleteSMPPAccount,
   getSMPPClients,  createSMPPClient,  updateSMPPClient,  deleteSMPPClient,
@@ -441,9 +444,10 @@ function SMPPAccountsTab() {
 
 function SMPPAccountModal({ initial, onClose, onSaved }) {
   const toast = useToast()
-  const [form, setForm] = useState(initial ? { ...SMPP_ACC_DEFAULTS, ...initial, password: '' } : { ...SMPP_ACC_DEFAULTS })
+  const [form, setForm, dirty] = useDirtyState(initial ? { ...SMPP_ACC_DEFAULTS, ...initial, password: '' } : { ...SMPP_ACC_DEFAULTS })
   const [submitting, setSubmitting] = useState(false)
   const set = useCallback((k, v) => setForm(p => ({ ...p, [k]: v })), [])
+  const { requestClose: guardedClose, confirming, confirmDiscard, cancelDiscard } = useConfirmClose(dirty, onClose)
 
   const handleSubmit = useCallback(async (e) => {
     e.preventDefault()
@@ -476,7 +480,7 @@ function SMPPAccountModal({ initial, onClose, onSaved }) {
   }, [form, initial, toast, onSaved])
 
   return (
-    <Modal title={initial ? 'Edit SMPP Account' : 'Add SMPP Account'} onClose={onClose}>
+    <Modal title={initial ? 'Edit SMPP Account' : 'Add SMPP Account'} onClose={guardedClose} closeOnBackdrop={false} closeOnEscape={false}>
       <form onSubmit={handleSubmit}>
         <div className="modal-body">
           <div className="form-row">
@@ -528,6 +532,7 @@ function SMPPAccountModal({ initial, onClose, onSaved }) {
           </button>
         </div>
       </form>
+      <DiscardConfirm open={confirming} onDiscard={confirmDiscard} onCancel={cancelDiscard} />
     </Modal>
   )
 }
@@ -631,7 +636,7 @@ function SMPPClientsTab() {
 
 function SMPPClientModal({ initial, onClose, onSaved }) {
   const toast = useToast()
-  const [form, setForm] = useState(() => {
+  const [form, setForm, dirty] = useDirtyState(() => {
     const base = initial ? { ...SMPP_CLI_DEFAULTS, ...initial } : { ...SMPP_CLI_DEFAULTS }
 	    base.reconnect_interval = normalizeReconnectInterval(base.reconnect_interval)
 	    base.transport = base.transport || 'tcp'
@@ -644,6 +649,7 @@ function SMPPClientModal({ initial, onClose, onSaved }) {
 	  })
   const [submitting, setSubmitting] = useState(false)
   const set = useCallback((k, v) => setForm(p => ({ ...p, [k]: v })), [])
+  const { requestClose: guardedClose, confirming, confirmDiscard, cancelDiscard } = useConfirmClose(dirty, onClose)
   const setTransport = useCallback((nextTransport) => {
     setForm((prev) => {
       const currentTransport = prev.transport || 'tcp'
@@ -693,7 +699,7 @@ function SMPPClientModal({ initial, onClose, onSaved }) {
   }, [form, initial, toast, onSaved])
 
   return (
-    <Modal title={initial ? 'Edit SMPP Client' : 'Add SMPP Client'} onClose={onClose}>
+    <Modal title={initial ? 'Edit SMPP Client' : 'Add SMPP Client'} onClose={guardedClose} closeOnBackdrop={false} closeOnEscape={false}>
       <form onSubmit={handleSubmit}>
         <div className="modal-body">
           <div className="form-group">
@@ -810,6 +816,7 @@ function SMPPClientModal({ initial, onClose, onSaved }) {
           </button>
         </div>
       </form>
+      <DiscardConfirm open={confirming} onDiscard={confirmDiscard} onCancel={cancelDiscard} />
     </Modal>
   )
 }
@@ -911,9 +918,10 @@ function SIPPeersTab() {
 
 function SIPPeerModal({ initial, onClose, onSaved }) {
   const toast = useToast()
-  const [form, setForm] = useState(initial ? buildSIPPeerPayload(initial) : { ...SIP_DEFAULTS })
+  const [form, setForm, dirty] = useDirtyState(initial ? buildSIPPeerPayload(initial) : { ...SIP_DEFAULTS })
   const [submitting, setSubmitting] = useState(false)
   const set = useCallback((k, v) => setForm(p => ({ ...p, [k]: v })), [])
+  const { requestClose: guardedClose, confirming, confirmDiscard, cancelDiscard } = useConfirmClose(dirty, onClose)
 
   const handleSubmit = useCallback(async (e) => {
     e.preventDefault()
@@ -936,7 +944,7 @@ function SIPPeerModal({ initial, onClose, onSaved }) {
   }, [form, initial, toast, onSaved])
 
   return (
-    <Modal title={initial ? 'Edit SIP Peer' : 'Add SIP Peer'} onClose={onClose}>
+    <Modal title={initial ? 'Edit SIP Peer' : 'Add SIP Peer'} onClose={guardedClose} closeOnBackdrop={false} closeOnEscape={false}>
       <form onSubmit={handleSubmit}>
         <div className="modal-body">
           <div className="form-group">
@@ -990,6 +998,7 @@ function SIPPeerModal({ initial, onClose, onSaved }) {
           </button>
         </div>
       </form>
+      <DiscardConfirm open={confirming} onDiscard={confirmDiscard} onCancel={cancelDiscard} />
     </Modal>
   )
 }
@@ -1166,9 +1175,10 @@ function SGDMMEMappingsTab() {
 
 function SGDMMEMappingModal({ initial, onClose, onSaved }) {
   const toast = useToast()
-  const [form, setForm] = useState(() => initial ? { ...SGD_MAPPING_DEFAULTS, ...initial } : { ...SGD_MAPPING_DEFAULTS })
+  const [form, setForm, dirty] = useDirtyState(() => initial ? { ...SGD_MAPPING_DEFAULTS, ...initial } : { ...SGD_MAPPING_DEFAULTS })
   const [submitting, setSubmitting] = useState(false)
   const set = useCallback((k, v) => setForm(p => ({ ...p, [k]: v })), [])
+  const { requestClose: guardedClose, confirming, confirmDiscard, cancelDiscard } = useConfirmClose(dirty, onClose)
 
   const handleSubmit = useCallback(async (e) => {
     e.preventDefault()
@@ -1190,7 +1200,7 @@ function SGDMMEMappingModal({ initial, onClose, onSaved }) {
   }, [form, initial, toast, onSaved])
 
   return (
-    <Modal title={initial ? 'Edit MME Mapping' : 'Add MME Mapping'} onClose={onClose}>
+    <Modal title={initial ? 'Edit MME Mapping' : 'Add MME Mapping'} onClose={guardedClose} closeOnBackdrop={false} closeOnEscape={false}>
       <form onSubmit={handleSubmit}>
         <div className="modal-body">
           <div className="form-group">
@@ -1220,13 +1230,14 @@ function SGDMMEMappingModal({ initial, onClose, onSaved }) {
           </button>
         </div>
       </form>
+      <DiscardConfirm open={confirming} onDiscard={confirmDiscard} onCancel={cancelDiscard} />
     </Modal>
   )
 }
 
 function DiameterPeerModal({ initial, onClose, onSaved }) {
   const toast = useToast()
-  const [form, setForm] = useState(() => {
+  const [form, setForm, dirty] = useDirtyState(() => {
     const base = initial ? { ...DIAM_DEFAULTS, ...initial } : { ...DIAM_DEFAULTS }
     // Normalise: if old single-value 'application' came in without 'applications', convert it.
     if (!Array.isArray(base.applications) || base.applications.length === 0) {
@@ -1236,6 +1247,7 @@ function DiameterPeerModal({ initial, onClose, onSaved }) {
   })
   const [submitting, setSubmitting] = useState(false)
   const set = useCallback((k, v) => setForm(p => ({ ...p, [k]: v })), [])
+  const { requestClose: guardedClose, confirming, confirmDiscard, cancelDiscard } = useConfirmClose(dirty, onClose)
 
   const toggleApp = useCallback((app) => {
     setForm(p => {
@@ -1282,7 +1294,7 @@ function DiameterPeerModal({ initial, onClose, onSaved }) {
   const apps = Array.isArray(form.applications) ? form.applications : []
 
   return (
-    <Modal title={initial ? 'Edit Diameter Peer' : 'Add Diameter Peer'} onClose={onClose}>
+    <Modal title={initial ? 'Edit Diameter Peer' : 'Add Diameter Peer'} onClose={guardedClose} closeOnBackdrop={false} closeOnEscape={false}>
       <form onSubmit={handleSubmit}>
         <div className="modal-body">
           <div className="form-group">
@@ -1336,6 +1348,7 @@ function DiameterPeerModal({ initial, onClose, onSaved }) {
           </button>
         </div>
       </form>
+      <DiscardConfirm open={confirming} onDiscard={confirmDiscard} onCancel={cancelDiscard} />
     </Modal>
   )
 }

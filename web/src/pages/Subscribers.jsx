@@ -3,8 +3,11 @@ import { Plus, Trash2, Edit3, RefreshCw, XCircle, Users } from 'lucide-react'
 import Badge from '../components/Badge.jsx'
 import Spinner from '../components/Spinner.jsx'
 import Modal from '../components/Modal.jsx'
+import DiscardConfirm from '../components/DiscardConfirm.jsx'
 import { useToast } from '../components/Toast.jsx'
 import { usePoller } from '../hooks/usePoller.js'
+import { useDirtyState } from '../hooks/useDirtyState.js'
+import { useConfirmClose } from '../hooks/useConfirmClose.js'
 import { getSubscribers, createSubscriber, updateSubscriber, deleteSubscriber } from '../api/client.js'
 
 const SUB_DEFAULTS = {
@@ -151,9 +154,10 @@ export default function Subscribers() {
 
 function SubscriberModal({ initial, onClose, onSaved }) {
   const toast = useToast()
-  const [form, setForm] = useState(initial ? { ...SUB_DEFAULTS, ...initial } : { ...SUB_DEFAULTS })
+  const [form, setForm, dirty] = useDirtyState(initial ? { ...SUB_DEFAULTS, ...initial } : { ...SUB_DEFAULTS })
   const [submitting, setSubmitting] = useState(false)
   const set = useCallback((k, v) => setForm(p => ({ ...p, [k]: v })), [])
+  const { requestClose: guardedClose, confirming, confirmDiscard, cancelDiscard } = useConfirmClose(dirty, onClose)
 
   const handleSubmit = useCallback(async (e) => {
     e.preventDefault()
@@ -173,7 +177,7 @@ function SubscriberModal({ initial, onClose, onSaved }) {
   }, [form, initial, toast, onSaved])
 
   return (
-    <Modal title={initial ? 'Edit Subscriber' : 'Add Subscriber'} onClose={onClose}>
+    <Modal title={initial ? 'Edit Subscriber' : 'Add Subscriber'} onClose={guardedClose} closeOnBackdrop={false} closeOnEscape={false}>
       <form onSubmit={handleSubmit}>
         <div className="modal-body">
           <div className="form-row">
@@ -213,6 +217,7 @@ function SubscriberModal({ initial, onClose, onSaved }) {
           </button>
         </div>
       </form>
+      <DiscardConfirm open={confirming} onDiscard={confirmDiscard} onCancel={cancelDiscard} />
     </Modal>
   )
 }

@@ -3,8 +3,11 @@ import { Plus, Trash2, Edit3, RefreshCw, XCircle, Power } from 'lucide-react'
 import Badge from '../components/Badge.jsx'
 import Spinner from '../components/Spinner.jsx'
 import Modal from '../components/Modal.jsx'
+import DiscardConfirm from '../components/DiscardConfirm.jsx'
 import { useToast } from '../components/Toast.jsx'
 import { usePoller } from '../hooks/usePoller.js'
+import { useDirtyState } from '../hooks/useDirtyState.js'
+import { useConfirmClose } from '../hooks/useConfirmClose.js'
 import {
   getRoutingRules, createRoutingRule, updateRoutingRule, deleteRoutingRule,
   getSFPolicies, createSFPolicy, updateSFPolicy, deleteSFPolicy,
@@ -223,11 +226,12 @@ function RoutingRulesTab() {
 
 function RuleModal({ initial, onClose, onSaved }) {
   const toast = useToast()
-  const [form, setForm] = useState(initial ? buildRoutingRulePayload(initial) : { ...RULE_DEFAULTS })
+  const [form, setForm, dirty] = useDirtyState(initial ? buildRoutingRulePayload(initial) : { ...RULE_DEFAULTS })
   const [submitting, setSubmitting] = useState(false)
   const [peers, setPeers] = useState({ smpp: [], sipsimple: [], sgd: [] })
   const [sfPolicies, setSFPolicies] = useState([])
   const set = useCallback((k, v) => setForm(p => ({ ...p, [k]: v })), [])
+  const { requestClose: guardedClose, confirming, confirmDiscard, cancelDiscard } = useConfirmClose(dirty, onClose)
 
   useEffect(() => {
     Promise.all([
@@ -282,7 +286,7 @@ function RuleModal({ initial, onClose, onSaved }) {
   }, [form, initial, toast, onSaved])
 
   return (
-    <Modal title={initial ? 'Edit Routing Rule' : 'Add Routing Rule'} onClose={onClose} size="lg">
+    <Modal title={initial ? 'Edit Routing Rule' : 'Add Routing Rule'} onClose={guardedClose} closeOnBackdrop={false} closeOnEscape={false} size="lg">
       <form onSubmit={handleSubmit}>
         <div className="modal-body">
           <div className="form-row">
@@ -407,6 +411,7 @@ function RuleModal({ initial, onClose, onSaved }) {
           </button>
         </div>
       </form>
+      <DiscardConfirm open={confirming} onDiscard={confirmDiscard} onCancel={cancelDiscard} />
     </Modal>
   )
 }
@@ -552,9 +557,10 @@ function SFPoliciesTab() {
 
 function SFPolicyModal({ initial, onClose, onSaved }) {
   const toast = useToast()
-  const [form, setForm] = useState(initial ? buildSFPolicyFormState(initial) : { ...SF_DEFAULTS })
+  const [form, setForm, dirty] = useDirtyState(initial ? buildSFPolicyFormState(initial) : { ...SF_DEFAULTS })
   const [submitting, setSubmitting] = useState(false)
   const set = useCallback((k, v) => setForm(p => ({ ...p, [k]: v })), [])
+  const { requestClose: guardedClose, confirming, confirmDiscard, cancelDiscard } = useConfirmClose(dirty, onClose)
 
   const handleSubmit = useCallback(async (e) => {
     e.preventDefault()
@@ -580,7 +586,7 @@ function SFPolicyModal({ initial, onClose, onSaved }) {
   }, [form, initial, toast, onSaved])
 
   return (
-    <Modal title={initial ? 'Edit SF Policy' : 'Add SF Policy'} onClose={onClose}>
+    <Modal title={initial ? 'Edit SF Policy' : 'Add SF Policy'} onClose={guardedClose} closeOnBackdrop={false} closeOnEscape={false}>
       <form onSubmit={handleSubmit}>
         <div className="modal-body">
           <div className="form-group">
@@ -612,6 +618,7 @@ function SFPolicyModal({ initial, onClose, onSaved }) {
           </button>
         </div>
       </form>
+      <DiscardConfirm open={confirming} onDiscard={confirmDiscard} onCancel={cancelDiscard} />
     </Modal>
   )
 }
